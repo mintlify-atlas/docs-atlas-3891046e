@@ -1,0 +1,308 @@
+---
+title: 'GET /siaa/recargar'
+description: 'Reload document index and clear cache'
+---
+
+## Overview
+
+The `/siaa/recargar` endpoint reloads all documents from the source directory (`/opt/siaa/fuentes/`), recalculates TF-IDF indexes, regenerates chunks, and clears the response cache. Use this endpoint after adding, updating, or removing documents.
+
+## Endpoint
+
+```
+GET /siaa/recargar
+```
+
+## Request
+
+No parameters required.
+
+## Response
+
+<ResponseField name="recargado" type="boolean">
+  Always `true` if the operation completed successfully
+</ResponseField>
+
+<ResponseField name="colecciones" type="object">
+  Object mapping collection names to document counts:
+  
+  ```json
+  {
+    "general": 5,
+    "juzgados": 12,
+    "formularios": 3
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="total_docs" type="number">
+  Total number of documents loaded across all collections
+</ResponseField>
+
+<ResponseField name="total_chunks" type="number">
+  Total number of pre-computed chunks across all documents
+</ResponseField>
+
+## Example Response
+
+```json
+{
+  "recargado": true,
+  "colecciones": {
+    "general": 5,
+    "juzgados": 12,
+    "formularios": 3
+  },
+  "total_docs": 20,
+  "total_chunks": 538
+}
+```
+
+## What Gets Reloaded
+
+The reload operation performs the following steps:
+
+### 1. Document Scanning
+
+- Scans `/opt/siaa/fuentes/` and all subdirectories
+- Loads all `.md` and `.txt` files
+- Reads file contents with UTF-8 encoding (ignoring errors)
+
+### 2. Tokenization
+
+- Extracts alphanumeric tokens (3+ characters)
+- Includes mixed alphanumeric terms (e.g., "psaa16", "art5")
+- Includes numbers with 4+ digits (e.g., "10476", "2016")
+- Removes Spanish stopwords
+
+### 3. TF-IDF Calculation
+
+- Calculates term frequency (TF) for each document
+- Calculates inverse document frequency (IDF) across collection
+- Generates top 20 keywords per document
+- Combines auto-generated keywords with manual keyword mappings
+
+### 4. Chunk Generation
+
+- Splits documents into fixed-size chunks (800 characters)
+- Applies overlap between chunks (300 characters)
+- Preserves section context (last heading before chunk)
+- Pre-computes all chunks for fast retrieval
+
+### 5. Density Index
+
+- Creates inverted index: term → [(density, document), ...]
+- Density = term_frequency / total_tokens_in_document
+- Sorted by density descending for fast document routing
+
+### 6. Cache Invalidation
+
+- **Clears all cached responses** (200 entries max)
+- Reason: Cached answers may reference old document content
+- New queries will regenerate cache based on updated documents
+
+## When to Use
+
+### After Adding New Documents
+
+```bash
+# 1. Copy new documents to source directory
+scp nuevo_acuerdo.md user@server:/opt/siaa/fuentes/
+
+# 2. Reload index
+curl http://localhost:5000/siaa/recargar
+
+# 3. Verify document loaded
+curl http://localhost:5000/siaa/status | jq '.total_documentos'
+```
+
+### After Updating Existing Documents
+
+```bash
+# 1. Edit document on server
+vim /opt/siaa/fuentes/acuerdo_psaa16-10476.md
+
+# 2. Reload to pick up changes
+curl http://localhost:5000/siaa/recargar
+
+# 3. Test updated content
+curl -X POST http://localhost:5000/siaa/chat \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"¿Cuándo reportar SIERJU?"}]}'
+```
+
+### After Removing Documents
+
+```bash
+# 1. Delete obsolete document
+rm /opt/siaa/fuentes/old_circular.md
+
+# 2. Reload index
+curl http://localhost:5000/siaa/recargar
+
+# 3. Confirm removal
+curl http://localhost:5000/siaa/status | jq '.colecciones.general.docs'
+```
+
+### After Server Restart
+
+Reload is **NOT needed** after server restart. Documents are automatically loaded on startup. However, you may want to reload if:
+
+- Documents were updated while server was down
+- You want to force cache clearing
+
+## Performance Impact
+
+### Reload Time
+
+For typical document sets:
+
+- **5-10 documents**: ~1-2 seconds
+- **20-50 documents**: ~3-5 seconds
+- **100+ documents**: ~10-15 seconds
+
+Factors affecting speed:
+- Document size (larger files take longer to tokenize)
+- Number of documents (TF-IDF is O(n²) worst case)
+- Disk I/O speed
+
+### System Impact During Reload
+
+- **Chat queries continue to work** using old index
+- Once reload completes, new index atomically replaces old one
+- Brief lock contention possible during index swap (~1ms)
+- All active streaming responses complete unaffected
+
+### Cache Impact
+
+- **All cached responses are cleared**
+- First query after reload will be slower (cache miss)
+- Cache rebuilds naturally as queries arrive
+- Typical hit rate recovers within 30-60 minutes
+
+## Error Handling
+
+The endpoint does **not return errors** even if:
+
+- Some documents fail to parse (they're skipped)
+- Directory doesn't exist (it's created)
+- No valid documents found (returns empty collections)
+
+Check server logs for detailed error messages:
+
+```bash
+journalctl -u siaa -f
+```
+
+Look for lines starting with `[Doc]`, `[KW]`, `[IDX]`.
+
+## Example Workflow: Adding New Regulatory Document
+
+```bash
+#!/bin/bash
+# Script: add_new_regulation.sh
+
+# 1. Upload new document
+echo "Uploading document..."
+scp circular_cendoj_15-2024.md server:/opt/siaa/fuentes/
+
+# 2. Reload SIAA index
+echo "Reloading SIAA index..."
+RESULT=$(curl -s http://server:5000/siaa/recargar)
+echo $RESULT | jq .
+
+# 3. Verify document is loaded
+DOC_COUNT=$(echo $RESULT | jq '.total_docs')
+echo "Total documents now: $DOC_COUNT"
+
+# 4. Test a query that should use the new document
+echo "Testing query..."
+curl -X POST http://server:5000/siaa/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {
+        "role": "user",
+        "content": "¿Qué dice la circular 15 de 2024?"
+      }
+    ]
+  }'
+
+echo "Done!"
+```
+
+## Monitoring Reload Operations
+
+### Check Current Document Count
+
+```bash
+curl -s http://localhost:5000/siaa/status | jq '{
+  total_documentos,
+  total_chunks,
+  colecciones
+}'
+```
+
+### Compare Before and After
+
+```bash
+# Before reload
+BEFORE=$(curl -s http://localhost:5000/siaa/status | jq '.total_documentos')
+
+# Perform reload
+curl -s http://localhost:5000/siaa/recargar
+
+# After reload
+AFTER=$(curl -s http://localhost:5000/siaa/status | jq '.total_documentos')
+
+echo "Documents before: $BEFORE"
+echo "Documents after: $AFTER"
+echo "Change: $(($AFTER - $BEFORE))"
+```
+
+### Verify Specific Document Loaded
+
+```bash
+curl -s http://localhost:5000/siaa/status | jq '.colecciones.general.docs | map(select(contains("psaa16")))'
+```
+
+Output:
+```json
+[
+  "acuerdo_no._psaa16-10476.md"
+]
+```
+
+## Automation
+
+### Cron Job: Daily Reload
+
+Reload index daily at 3 AM to pick up any document updates:
+
+```cron
+0 3 * * * curl -s http://localhost:5000/siaa/recargar > /var/log/siaa/reload.log 2>&1
+```
+
+### File Watcher: Auto-reload on Change
+
+Use `inotifywait` to trigger reload when documents change:
+
+```bash
+#!/bin/bash
+# Script: auto_reload.sh
+
+inotifywait -m -e modify,create,delete /opt/siaa/fuentes/ |
+while read path action file; do
+  echo "[$(date)] Detected $action on $file"
+  sleep 5  # Debounce multiple changes
+  curl -s http://localhost:5000/siaa/recargar
+  echo "[$(date)] Reload completed"
+done
+```
+
+## Related Endpoints
+
+- [GET /siaa/status](/api/status) - Check current document count and collections
+- [GET /siaa/cache](/api/cache) - View cache statistics (will be empty after reload)
+- [DELETE /siaa/cache](/api/cache) - Clear cache without reloading documents
+- [GET /siaa/ver/\<nombre_doc\>](/api/view-document) - View individual documents

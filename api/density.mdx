@@ -1,0 +1,142 @@
+---
+title: 'GET /siaa/densidad/<termino>'
+description: 'Lookup term density across all documents'
+---
+
+## Overview
+
+The `/siaa/densidad/<termino>` endpoint returns a ranked list of documents containing a specific term, ordered by density (frequency relative to document length). This helps debug why certain documents are being selected for specific queries.
+
+## Endpoint
+
+```
+GET /siaa/densidad/<termino>
+```
+
+## Parameters
+
+<ParamField path="termino" type="string" required>
+  The term to search for in the density index. Must be lowercase and at least 3 characters.
+  
+  Example: `sierju`, `periodicidad`, `10476`
+</ParamField>
+
+## Response
+
+<ResponseField name="termino" type="string">
+  The searched term (normalized to lowercase)
+</ResponseField>
+
+<ResponseField name="top_docs" type="array of objects">
+  Top 10 documents containing this term, ordered by density (highest first)
+  
+  <Expandable title="properties">
+    <ResponseField name="doc" type="string">
+      Document filename
+    </ResponseField>
+    
+    <ResponseField name="densidad" type="number">
+      Term density score (frequency / total_tokens in document). Higher values indicate the term appears more frequently relative to document length.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="total_docs" type="integer">
+  Total number of documents containing this term
+</ResponseField>
+
+## Error Response
+
+If the term is not found in the density index:
+
+<ResponseField name="error" type="string">
+  Error message indicating the term is not in the index
+</ResponseField>
+
+Status code: `404`
+
+## Example
+
+### Request
+
+```bash
+curl http://localhost:5000/siaa/densidad/sierju
+```
+
+### Response
+
+```json
+{
+  "termino": "sierju",
+  "top_docs": [
+    {
+      "doc": "acuerdo_no._psaa16-10476.md",
+      "densidad": 0.042156
+    },
+    {
+      "doc": "guia_sierju_despachos.md",
+      "densidad": 0.038947
+    },
+    {
+      "doc": "acuerdo_pcsja19-11207.md",
+      "densidad": 0.021338
+    },
+    {
+      "doc": "instructivo_periodicidad.md",
+      "densidad": 0.018562
+    }
+  ],
+  "total_docs": 4
+}
+```
+
+## Use Cases
+
+### Understanding Query Routing
+
+When debugging why a particular document was selected for a query, check the density of key terms:
+
+```bash
+curl http://localhost:5000/siaa/densidad/periodicidad
+```
+
+Documents with higher density scores for query terms are more likely to be selected by the routing algorithm.
+
+### Validating Alphanumeric Term Extraction
+
+Verify that alphanumeric codes are correctly indexed:
+
+```bash
+curl http://localhost:5000/siaa/densidad/psaa16
+```
+
+If the term returns a 404, it means the tokenizer filtered it out (check the tokenization rules).
+
+### Finding Document Distribution
+
+Determine which documents discuss a specific topic:
+
+```bash
+curl http://localhost:5000/siaa/densidad/sancion
+```
+
+Use `total_docs` to see how many documents contain the term across the entire corpus.
+
+### Testing Numeric Code Indexing
+
+Confirm that important numeric codes (4+ digits) are indexed:
+
+```bash
+curl http://localhost:5000/siaa/densidad/10476
+```
+
+This should return documents containing the decree number "10476".
+
+## Notes
+
+- Density is calculated as: `term_frequency / total_tokens_in_document`
+- Only terms with 3+ characters are indexed
+- Stopwords are filtered out during indexing
+- Pure numeric terms are only indexed if they have 4+ digits (e.g., "2016", "10476")
+- Alphanumeric terms with letters are always indexed (e.g., "psaa16", "pcsja19")
+- The density index is built during document loading and cached in memory

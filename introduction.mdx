@@ -1,0 +1,93 @@
+---
+title: "Introduction"
+description: "Sistema Inteligente de Apoyo Administrativo for judicial document management and intelligent query assistance"
+---
+
+# Welcome to SIAA
+
+SIAA (Sistema Inteligente de Apoyo Administrativo) is an intelligent proxy system designed for the judicial sector in Bucaramanga, Colombia. It provides AI-powered document retrieval and query assistance for judicial administrative staff.
+
+## What is SIAA?
+
+SIAA is a comprehensive document management and intelligent query system that combines:
+
+- **RAG-based Q&A**: Context-aware responses powered by Ollama and Qwen2.5 language model
+- **Multi-level Document Routing**: Advanced TF-IDF and density indexing for precise document retrieval
+- **Document Processing Pipeline**: Automated conversion of Word, PDF, and Excel documents
+- **Performance Optimization**: LRU caching with 1-hour TTL and automatic model warm-up
+- **Quality Monitoring**: Built-in hallucination detection and JSONL-based query logging
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Intelligent Retrieval" icon="magnifying-glass" href="/features/intelligent-retrieval">
+    Multi-level document routing with TF-IDF and density indexing
+  </Card>
+  <Card title="Document Processing" icon="file-import" href="/features/document-processing">
+    Convert Word, PDF, and Excel files to searchable formats
+  </Card>
+  <Card title="Response Caching" icon="database" href="/features/cache-system">
+    LRU cache with 200 entries and 1-hour TTL
+  </Card>
+  <Card title="Quality Monitoring" icon="chart-line" href="/features/quality-monitoring">
+    JSONL logging with hallucination detection
+  </Card>
+</CardGroup>
+
+## Quick Start
+
+Get SIAA up and running in your environment:
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Set up SIAA with all dependencies
+  </Card>
+  <Card title="Quickstart Guide" icon="rocket" href="/quickstart">
+    Deploy and configure your first instance
+  </Card>
+</CardGroup>
+
+## Architecture Overview
+
+SIAA uses a sophisticated multi-layer architecture:
+
+<Steps>
+  <Step title="Document Ingestion">
+    Documents are converted to Markdown using LibreOffice headless or pymupdf4llm
+  </Step>
+  <Step title="Chunking & Indexing">
+    Documents are split into overlapping chunks with TF-IDF keyword extraction
+  </Step>
+  <Step title="Query Processing">
+    User queries are routed to relevant documents using multi-level scoring
+  </Step>
+  <Step title="Context Extraction">
+    The most relevant chunks are extracted and sent to the language model
+  </Step>
+  <Step title="Response Generation">
+    Ollama generates streaming responses with source citations
+  </Step>
+</Steps>
+
+## Use Cases
+
+SIAA is designed for judicial administrative staff who need:
+
+- Quick answers about procedural requirements and deadlines
+- Information retrieval from regulatory documents (PSAA, PCSJA agreements)
+- Guidance on SIERJU reporting requirements
+- Administrative procedure documentation
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Install SIAA" icon="terminal" href="/installation">
+    Follow the installation guide
+  </Card>
+  <Card title="Configure System" icon="gear" href="/administration/configuration">
+    Configure Ollama and Flask
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/chat">
+    Explore the API endpoints
+  </Card>
+</CardGroup>

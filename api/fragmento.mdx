@@ -1,0 +1,178 @@
+---
+title: 'GET /siaa/fragmento'
+description: 'Test fragment extraction from a specific document'
+---
+
+## Overview
+
+The `/siaa/fragmento` endpoint shows exactly which text fragments (chunks) would be extracted from a document and sent to the AI model for a given query. This is the most detailed diagnostic tool for understanding what context the model receives.
+
+## Endpoint
+
+```
+GET /siaa/fragmento?doc=<nombre_doc>&q=<pregunta>
+```
+
+## Parameters
+
+<ParamField query="doc" type="string" required>
+  Document filename (case-insensitive, lowercase recommended)
+  
+  Example: `acuerdo_no._psaa16-10476.md`
+</ParamField>
+
+<ParamField query="q" type="string" required>
+  The query/question used for fragment extraction. The extractor selects the most relevant chunks based on this query.
+  
+  Example: `¿Cuáles son los funcionarios responsables?`
+</ParamField>
+
+## Response
+
+<ResponseField name="documento" type="string">
+  The document filename that was searched
+</ResponseField>
+
+<ResponseField name="pregunta" type="string">
+  The query that was used for extraction
+</ResponseField>
+
+<ResponseField name="fragmento" type="string">
+  The extracted text that would be sent to the AI model as context. This includes:
+  - Document header with name and section markers
+  - Up to `MAX_CHUNKS_CONTEXTO` (default: 3) selected chunks
+  - Each chunk includes its section heading
+  - Total size limited by `CHUNK_SIZE` × `MAX_CHUNKS_CONTEXTO`
+</ResponseField>
+
+<ResponseField name="chars" type="integer">
+  Total character count of the extracted fragment
+</ResponseField>
+
+## Error Response
+
+If required parameters are missing:
+
+<ResponseField name="error" type="string">
+  Error message: "Parámetros 'doc' y 'q' requeridos"
+</ResponseField>
+
+Status code: `400`
+
+## Example
+
+### Request
+
+```bash
+curl "http://localhost:5000/siaa/fragmento?doc=acuerdo_no._psaa16-10476.md&q=funcionarios+responsables"
+```
+
+### Response
+
+```json
+{
+  "documento": "acuerdo_no._psaa16-10476.md",
+  "pregunta": "funcionarios responsables",
+  "fragmento": "[DOC:ACUERDO_NO._PSAA16-10476.MD]
+
+### ARTÍCULO 5º — FUNCIONARIOS RESPONSABLES
+
+Los Magistrados, Jueces y demás funcionarios responsables de la administración y registro de los procesos en sus respectivos despachos, deberán diligenciar y reportar la información...
+
+### ARTÍCULO 7º — ROLES Y PERMISOS
+
+El SIERJU cuenta con los siguientes roles:
+1. Súper Administrador
+2. Administrador Nacional
+3. Administrador Seccional
+4. Funcionario (Magistrado o Juez)
+
+Cada funcionario tiene la responsabilidad de cargar...",
+  "chars": 2387
+}
+```
+
+## Use Cases
+
+### Debugging "No encontré información" Responses
+
+When the AI model responds that it couldn't find information, check what context it actually received:
+
+```bash
+curl "http://localhost:5000/siaa/fragmento?doc=acuerdo_no._psaa16-10476.md&q=¿Qué+pasa+si+no+reporto+a+tiempo?"
+```
+
+If the fragment doesn't contain sanction information, the extraction algorithm needs tuning (check query expansion or manual keywords).
+
+### Validating Chunk Selection
+
+Verify that the most relevant chunks are being selected:
+
+```bash
+curl "http://localhost:5000/siaa/fragmento?doc=acuerdo_pcsja19-11207.md&q=¿Quién+capacita?"
+```
+
+The fragment should include chunks mentioning "CENDOJ", "UDAE", or "capacitación".
+
+### Testing Query Expansion
+
+Compare fragments for queries with and without expanded terms:
+
+```bash
+# Without temporal terms
+curl "http://localhost:5000/siaa/fragmento?doc=acuerdo_no._psaa16-10476.md&q=reportar"
+
+# With temporal query (triggers expansion)
+curl "http://localhost:5000/siaa/fragmento?doc=acuerdo_no._psaa16-10476.md&q=¿Cuándo+debo+reportar?"
+```
+
+The second query should return chunks containing "periodicidad", "plazo", "quinto día hábil".
+
+### Checking Article Bonus Scoring
+
+When querying for specific articles, verify the correct article is extracted:
+
+```bash
+curl "http://localhost:5000/siaa/fragmento?doc=acuerdo_no._psaa16-10476.md&q=artículo+5"
+```
+
+The fragment should prioritize chunks containing "artículo 5°" or "art. 5°" due to the article bonus scoring (+10 for exact match with degree symbol).
+
+### Analyzing Context Size
+
+Check if the extracted context is within optimal size limits:
+
+```bash
+curl "http://localhost:5000/siaa/fragmento?doc=guia_civil_municipal.md&q=procedimiento+de+ingreso" | jq '.chars'
+```
+
+Optimal range: 1200-2400 characters (allows up to 3 chunks × 800 chars each).
+If `chars` is too low (&lt;500), the extraction might be too selective.
+If `chars` is at maximum (2400), consider if all chunks are equally relevant.
+
+### Testing Overlap Effectiveness
+
+Chunks have `CHUNK_OVERLAP` (default: 300 chars) to prevent splitting articles:
+
+```bash
+curl "http://localhost:5000/siaa/fragmento?doc=acuerdo_no._psaa16-10476.md&q=artículo+19+y+20+sanciones"
+```
+
+If Articles 19 and 20 are consecutive, the overlap should ensure both are captured even if they span chunk boundaries.
+
+## Notes
+
+- Chunks are pre-calculated during document loading with `CHUNK_SIZE` (default: 800) and `CHUNK_OVERLAP` (default: 300)
+- The extraction algorithm uses a sophisticated scoring system:
+  - **Base scoring**: TF-IDF weighted by term frequency in chunk
+  - **Query match bonus**: +15 if the full query appears in the chunk
+  - **Article bonus**: +10 for "artículo N°", +5 for "artículo N"
+  - **Numbered list bonus**: +4 for chunks with procedural steps
+  - **Proximity bonus**: Up to +20 for high keyword density in 150-char windows
+- Query expansion automatically adds related terms:
+  - Temporal queries ("cuándo") → adds "periodicidad", "plazo", "hábil"
+  - Definition queries ("qué es") → adds "sistema", "herramienta", "objeto"
+  - Responsibility queries ("quién") → adds "responsable", "funcionario"
+  - Sanction queries ("qué pasa") → adds "sanción", "disciplinario", "incumplimiento"
+- Listing questions ("cuáles son", "enumera") force minimum 2 chunks to avoid truncation
+- The actual AI model receives this fragment wrapped in `[DOC:NAME]` markers

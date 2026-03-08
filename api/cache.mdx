@@ -1,0 +1,416 @@
+---
+title: 'GET/DELETE /siaa/cache'
+description: 'View cache statistics and clear cached responses'
+---
+
+## Overview
+
+The `/siaa/cache` endpoint provides access to the LRU response cache, which stores frequently asked questions and their answers. Use `GET` to view statistics and `DELETE` to clear the cache.
+
+## Cache Design
+
+SIAA implements an **LRU (Least Recently Used) cache** for document-based queries:
+
+- **Max entries**: 200 responses
+- **TTL**: 3600 seconds (1 hour)
+- **Key normalization**: Case-insensitive, accent-insensitive, punctuation-removed
+- **Thread-safe**: Protected with locks for concurrent access
+- **Selective caching**: Only document queries are cached (not conversational queries)
+
+### What Gets Cached
+
+✅ **Cached**:
+- Document-based queries ("¿Cuándo reportar SIERJU?")
+- Questions containing judicial/technical terms
+- Queries longer than 8 characters that aren't conversational
+
+❌ **NOT cached**:
+- Conversational queries ("Hola", "Gracias")
+- Negative responses ("No encontré esa información...")
+- Empty responses
+- Queries that trigger clarification
+
+### Cache Key Normalization
+
+Queries are normalized before hashing:
+
+```python
+Query: "¿Cuándo debo reportar?"
+Normalized: "cuando debo reportar"
+Hash: SHA256[:16]
+```
+
+This means these queries hit the same cache entry:
+- "¿Cuándo debo reportar?"
+- "cuando debo reportar"
+- "CUANDO DEBO REPORTAR"
+- "Cuándo debo reportar." (punctuation removed)
+
+## GET /siaa/cache
+
+Retrieve cache statistics.
+
+### Request
+
+```
+GET /siaa/cache
+```
+
+No parameters required.
+
+### Response
+
+<ResponseField name="entradas" type="number">
+  Current number of cached responses (0-200)
+</ResponseField>
+
+<ResponseField name="max" type="number">
+  Maximum cache capacity (200)
+</ResponseField>
+
+<ResponseField name="hits" type="number">
+  Total cache hits since server startup or last cache clear
+</ResponseField>
+
+<ResponseField name="misses" type="number">
+  Total cache misses since server startup or last cache clear
+</ResponseField>
+
+<ResponseField name="hit_rate" type="string">
+  Cache hit rate as a percentage (e.g., "38.5%")
+</ResponseField>
+
+<ResponseField name="ttl_seg" type="number">
+  Time-to-live for each cache entry in seconds (3600)
+</ResponseField>
+
+### Example Response
+
+```json
+{
+  "entradas": 87,
+  "max": 200,
+  "hits": 245,
+  "misses": 392,
+  "hit_rate": "38.5%",
+  "ttl_seg": 3600
+}
+```
+
+### Example Usage
+
+```bash
+curl http://localhost:5000/siaa/cache
+```
+
+## DELETE /siaa/cache
+
+Clear all cached responses.
+
+### Request
+
+```
+DELETE /siaa/cache
+```
+
+No parameters required.
+
+### Response
+
+<ResponseField name="vaciado" type="boolean">
+  Always `true` if the operation completed successfully
+</ResponseField>
+
+<ResponseField name="mensaje" type="string">
+  Confirmation message: "Caché limpiado correctamente"
+</ResponseField>
+
+### Example Response
+
+```json
+{
+  "vaciado": true,
+  "mensaje": "Caché limpiado correctamente"
+}
+```
+
+### Example Usage
+
+```bash
+curl -X DELETE http://localhost:5000/siaa/cache
+```
+
+## When to Clear Cache
+
+### After Document Updates
+
+When source documents are modified, cached responses may contain outdated information:
+
+```bash
+# 1. Update document
+vim /opt/siaa/fuentes/acuerdo_psaa16-10476.md
+
+# 2. Reload documents and clear cache
+curl http://localhost:5000/siaa/recargar
+
+# Note: /siaa/recargar automatically clears cache
+# Manual clear not needed unless reloading without document changes
+```
+
+### Manual Cache Clear (Without Document Reload)
+
+If you only want to clear cached responses without reloading documents:
+
+```bash
+curl -X DELETE http://localhost:5000/siaa/cache
+```
+
+### Testing New Configurations
+
+When testing changes to chunk selection, routing algorithms, or prompts:
+
+```bash
+# Clear cache to ensure queries use new logic
+curl -X DELETE http://localhost:5000/siaa/cache
+
+# Test query
+curl -X POST http://localhost:5000/siaa/chat \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Test query"}]}'
+```
+
+### Debugging Response Quality
+
+If users report incorrect answers, clear cache to eliminate stale responses:
+
+```bash
+# Clear cache
+curl -X DELETE http://localhost:5000/siaa/cache
+
+# Reproduce user query
+curl -X POST http://localhost:5000/siaa/chat \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"User query here"}]}'
+```
+
+## Cache Performance Metrics
+
+### Understanding Hit Rate
+
+**Hit rate = hits / (hits + misses)**
+
+- **> 30%**: Excellent - Many users ask similar questions
+- **20-30%**: Good - Cache is effective
+- **10-20%**: Fair - Questions are diverse
+- **< 10%**: Low - Consider increasing cache size or TTL
+
+### Expected Performance
+
+For 26 judicial offices (despachos):
+
+- **Without cache**: ~44 seconds per query (LLM inference)
+- **With cache hit**: ~5ms per query (8800x faster)
+- **Expected hit rate**: 30-40% (based on common procedural questions)
+
+### Cache Size Utilization
+
+```bash
+# Check cache fullness
+curl -s http://localhost:5000/siaa/cache | jq '{
+  utilization: (.entradas / .max * 100 | tostring + "%"),
+  entradas,
+  max
+}'
+```
+
+Output:
+```json
+{
+  "utilization": "43.5%",
+  "entradas": 87,
+  "max": 200
+}
+```
+
+### Cache Hit Rate Over Time
+
+```bash
+# Monitor hit rate every 10 seconds
+watch -n 10 'curl -s http://localhost:5000/siaa/cache | jq .hit_rate'
+```
+
+## LRU Eviction
+
+When the cache reaches 200 entries:
+
+1. **New entry arrives**: Cache is full
+2. **Eviction**: Least recently used entry is removed (front of OrderedDict)
+3. **Insertion**: New entry added to the back
+
+**Access pattern updates LRU order**:
+- Cache hit → Entry moved to back (most recently used)
+- Cache miss → No change to existing entries
+
+## Cache Validation (TTL)
+
+Each cache entry has a timestamp. On lookup:
+
+1. **Entry found**: Check `current_time - entry.timestamp > TTL`
+2. **If expired**: Delete entry, return cache miss
+3. **If valid**: Increment hit counter, move to back, return cached response
+
+This ensures responses are no older than 1 hour.
+
+## Monitoring Cache Health
+
+### Daily Stats Collection
+
+```bash
+#!/bin/bash
+# Script: collect_cache_stats.sh
+
+TIMESTAMP=$(date +%Y-%m-%d_%H:%M:%S)
+STATS=$(curl -s http://localhost:5000/siaa/cache)
+
+echo "$TIMESTAMP $STATS" >> /var/log/siaa/cache_stats.log
+```
+
+Run via cron every hour:
+```cron
+0 * * * * /opt/siaa/scripts/collect_cache_stats.sh
+```
+
+### Analyze Cache Trends
+
+```bash
+# Extract hit rates from log
+grep -oP '"hit_rate":"\K[0-9.]+' /var/log/siaa/cache_stats.log | tail -24
+```
+
+### Alert on Low Hit Rate
+
+```bash
+#!/bin/bash
+# Alert if hit rate drops below 15%
+
+HIT_RATE=$(curl -s http://localhost:5000/siaa/cache | jq -r '.hit_rate' | tr -d '%')
+
+if (( $(echo "$HIT_RATE < 15" | bc -l) )); then
+  echo "ALERT: Cache hit rate is ${HIT_RATE}%" | \
+    mail -s "SIAA Cache Performance Warning" admin@example.com
+fi
+```
+
+## Cache Data Structure
+
+Internal structure (not exposed via API):
+
+```python
+_cache_respuestas = OrderedDict()  # LRU ordering
+
+# Each entry:
+{
+  "<hash_key>": {
+    "respuesta": "<full response text>",
+    "cita": "<citation footer>",
+    "ts": 1234567890.123,  # Unix timestamp
+    "hits": 42  # Number of times this entry was reused
+  }
+}
+```
+
+## Cache Headers in Chat Response
+
+When a chat query hits the cache, the response includes:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: text/event-stream
+X-Cache: HIT
+```
+
+The `X-Cache: HIT` header indicates the response was served from cache.
+
+## Examples
+
+### Example 1: Monitor Cache Growth
+
+```bash
+# Initial state
+curl -s http://localhost:5000/siaa/cache
+# {"entradas": 0, "hits": 0, "misses": 0, ...}
+
+# Ask a question
+curl -X POST http://localhost:5000/siaa/chat \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"¿Cuándo reportar SIERJU?"}]}'
+
+# Check cache (miss + insert)
+curl -s http://localhost:5000/siaa/cache
+# {"entradas": 1, "hits": 0, "misses": 1, "hit_rate": "0%"}
+
+# Ask same question again
+curl -X POST http://localhost:5000/siaa/chat \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"¿Cuándo reportar SIERJU?"}]}'
+
+# Check cache (hit)
+curl -s http://localhost:5000/siaa/cache
+# {"entradas": 1, "hits": 1, "misses": 1, "hit_rate": "50.0%"}
+```
+
+### Example 2: Clear and Verify
+
+```bash
+# Clear cache
+curl -X DELETE http://localhost:5000/siaa/cache
+# {"vaciado": true, "mensaje": "Caché limpiado correctamente"}
+
+# Verify cleared
+curl -s http://localhost:5000/siaa/cache
+# {"entradas": 0, "hits": 0, "misses": 0, "hit_rate": "0%", ...}
+```
+
+### Example 3: Cache Performance Report
+
+```bash
+curl -s http://localhost:5000/siaa/cache | jq '{
+  performance: {
+    hit_rate,
+    total_queries: (.hits + .misses),
+    cache_hits: .hits,
+    cache_misses: .misses
+  },
+  capacity: {
+    used: .entradas,
+    available: (.max - .entradas),
+    utilization: ((.entradas / .max * 100 | floor | tostring) + "%")
+  },
+  ttl_hours: (.ttl_seg / 3600)
+}'
+```
+
+Output:
+```json
+{
+  "performance": {
+    "hit_rate": "38.5%",
+    "total_queries": 637,
+    "cache_hits": 245,
+    "cache_misses": 392
+  },
+  "capacity": {
+    "used": 87,
+    "available": 113,
+    "utilization": "43%"
+  },
+  "ttl_hours": 1
+}
+```
+
+## Related Endpoints
+
+- [GET /siaa/status](/api/status) - Includes cache stats as part of overall system status
+- [GET /siaa/recargar](/api/reload) - Automatically clears cache when reloading documents
+- [POST /siaa/chat](/api/chat) - Uses cache for fast responses on repeated queries
+- [GET /siaa/log](/api/log) - Shows `CACHE_HIT` entries in quality logs

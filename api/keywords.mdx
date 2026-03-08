@@ -1,0 +1,112 @@
+---
+title: 'GET /siaa/keywords/<nombre_doc>'
+description: 'View TF-IDF keywords extracted from a specific document'
+---
+
+## Overview
+
+The `/siaa/keywords/<nombre_doc>` endpoint returns the TF-IDF (Term Frequency-Inverse Document Frequency) keywords that have been automatically extracted from a specified document. This is useful for debugging routing issues and understanding which terms the system considers most relevant for each document.
+
+## Endpoint
+
+```
+GET /siaa/keywords/<nombre_doc>
+```
+
+## Parameters
+
+<ParamField path="nombre_doc" type="string" required>
+  Document filename (case-insensitive). Spaces can be encoded as `+` or `%20`.
+  
+  Example: `acuerdo_no._psaa16-10476.md`
+</ParamField>
+
+## Response
+
+<ResponseField name="documento" type="string">
+  The normalized document name
+</ResponseField>
+
+<ResponseField name="keywords" type="array of strings">
+  List of top TF-IDF keywords for this document, ordered by relevance score. The system extracts up to 20 keywords per document.
+</ResponseField>
+
+## Error Response
+
+If the document is not found:
+
+<ResponseField name="error" type="string">
+  Error message indicating the document was not found
+</ResponseField>
+
+Status code: `404`
+
+## Example
+
+### Request
+
+```bash
+curl http://localhost:5000/siaa/keywords/acuerdo_no._psaa16-10476.md
+```
+
+### Response
+
+```json
+{
+  "documento": "acuerdo_no._psaa16-10476.md",
+  "keywords": [
+    "sierju",
+    "periodicidad",
+    "reportar",
+    "formulario",
+    "recoleccion",
+    "discrepancia",
+    "roles",
+    "funcionario",
+    "responsable",
+    "sancion",
+    "incumplimiento",
+    "disciplinario",
+    "estadistica",
+    "inventario",
+    "magistrado",
+    "administrador",
+    "quinto",
+    "habil",
+    "carga",
+    "diligenciar"
+  ]
+}
+```
+
+## Use Cases
+
+### Debugging Document Routing
+
+When a user query isn't finding the expected document, check the keywords to understand what terms the routing algorithm associates with that document:
+
+```bash
+curl http://localhost:5000/siaa/keywords/acuerdo_pcsja19-11207.md
+```
+
+If the expected keywords are missing, you may need to add manual keywords in the `KEYWORDS_MANUALES` configuration.
+
+### Understanding Document Content
+
+Quickly understand the main topics covered in a document without reading the full text:
+
+```bash
+curl http://localhost:5000/siaa/keywords/guia_civil_municipal.md
+```
+
+### Validating TF-IDF Extraction
+
+After updating documents or changing the tokenization rules, verify that important terms (including alphanumeric codes like "psaa16" or "10476") are being extracted correctly.
+
+## Notes
+
+- Keywords are automatically generated during document loading using TF-IDF scoring
+- The system filters out stopwords and short tokens (less than 3 characters)
+- Alphanumeric terms with letters are always included (e.g., "psaa16", "art5")
+- Pure numeric terms are included only if they have 4+ digits (e.g., "10476", "2016")
+- Keywords are cached until documents are reloaded

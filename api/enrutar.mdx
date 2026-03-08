@@ -1,0 +1,176 @@
+---
+title: 'GET /siaa/enrutar'
+description: 'Test the document routing algorithm with a query'
+---
+
+## Overview
+
+The `/siaa/enrutar` endpoint simulates the document routing process without actually extracting fragments or calling the AI model. It shows which documents would be selected for a given query and why, making it essential for debugging retrieval issues.
+
+## Endpoint
+
+```
+GET /siaa/enrutar?q=<pregunta>
+```
+
+## Parameters
+
+<ParamField query="q" type="string" required>
+  The query/question to test against the routing algorithm
+  
+  Example: `¿Cuál es la periodicidad del reporte SIERJU?`
+</ParamField>
+
+## Response
+
+<ResponseField name="pregunta" type="string">
+  The original query string
+</ResponseField>
+
+<ResponseField name="doc_especifico" type="boolean">
+  Whether the query contains specific document references (e.g., "PSAA16", "Acuerdo", "Circular"). When `true`, only 1 document is returned; otherwise, up to `MAX_DOCS_CONTEXTO` documents are returned.
+</ResponseField>
+
+<ResponseField name="max_docs_usados" type="integer">
+  Maximum number of documents that would be used for this query (1 for specific doc queries, 2 for general queries in the default configuration)
+</ResponseField>
+
+<ResponseField name="docs_encontrados" type="array of objects">
+  List of documents selected by the routing algorithm, in ranked order
+  
+  <Expandable title="properties">
+    <ResponseField name="doc" type="string">
+      Document filename
+    </ResponseField>
+    
+    <ResponseField name="tamano" type="integer">
+      Document size in characters
+    </ResponseField>
+    
+    <ResponseField name="coleccion" type="string">
+      Collection name the document belongs to (e.g., "general", "juzgados")
+    </ResponseField>
+    
+    <ResponseField name="chunks" type="integer">
+      Number of pre-calculated chunks in this document
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Example
+
+### Request
+
+```bash
+curl "http://localhost:5000/siaa/enrutar?q=¿Cuál+es+la+periodicidad+del+reporte+SIERJU?"
+```
+
+### Response
+
+```json
+{
+  "pregunta": "¿Cuál es la periodicidad del reporte SIERJU?",
+  "doc_especifico": false,
+  "max_docs_usados": 2,
+  "docs_encontrados": [
+    {
+      "doc": "acuerdo_no._psaa16-10476.md",
+      "tamano": 45826,
+      "coleccion": "general",
+      "chunks": 38
+    },
+    {
+      "doc": "guia_sierju_despachos.md",
+      "tamano": 12453,
+      "coleccion": "general",
+      "chunks": 15
+    }
+  ]
+}
+```
+
+### Request with Specific Document Reference
+
+```bash
+curl "http://localhost:5000/siaa/enrutar?q=¿Qué+dice+el+artículo+5+del+PSAA16?"
+```
+
+### Response
+
+```json
+{
+  "pregunta": "¿Qué dice el artículo 5 del PSAA16?",
+  "doc_especifico": true,
+  "max_docs_usados": 1,
+  "docs_encontrados": [
+    {
+      "doc": "acuerdo_no._psaa16-10476.md",
+      "tamano": 45826,
+      "coleccion": "general",
+      "chunks": 38
+    }
+  ]
+}
+```
+
+## Use Cases
+
+### Debugging Wrong Document Selection
+
+When users report that the system is returning answers from the wrong document:
+
+```bash
+curl "http://localhost:5000/siaa/enrutar?q=¿Quién+debe+capacitar+sobre+SIERJU?"
+```
+
+Verify that the expected document appears in `docs_encontrados`. If not, check:
+- Keywords for the expected document (`/siaa/keywords/<doc>`)
+- Term density for query terms (`/siaa/densidad/<term>`)
+- Manual keyword configuration in `KEYWORDS_MANUALES`
+
+### Testing Query Variations
+
+Compare how different phrasings affect document selection:
+
+```bash
+# Formal phrasing
+curl "http://localhost:5000/siaa/enrutar?q=periodicidad+del+formulario+SIERJU"
+
+# Casual phrasing
+curl "http://localhost:5000/siaa/enrutar?q=cada+cuánto+reporto+en+SIERJU"
+```
+
+### Validating Multi-Level Routing
+
+The routing algorithm uses three levels:
+1. **TF-IDF keywords** (automatic + manual) — weight 2.0
+2. **Term density** across documents — weight 1.0
+3. **Filename token matching** — weight 1.5
+
+Test whether specific document names are being matched:
+
+```bash
+curl "http://localhost:5000/siaa/enrutar?q=acuerdo+psaa16+10476"
+```
+
+This should strongly favor the matching document due to filename token scoring.
+
+### Verifying Specific Document Detection
+
+The system limits results to 1 document when queries mention specific documents:
+
+```bash
+# Should set doc_especifico = true
+curl "http://localhost:5000/siaa/enrutar?q=circular+2023"
+
+# Should set doc_especifico = false
+curl "http://localhost:5000/siaa/enrutar?q=periodicidad+de+reportes"
+```
+
+## Notes
+
+- The routing algorithm uses a multi-level scoring system combining TF-IDF, term density, and filename matching
+- Specific document patterns include: `psaa`, `pcsja`, `acuerdo`, `circular`, `resolución`, `decreto`
+- The `MAX_DOCS_CONTEXTO` configuration (default: 2) determines the maximum documents for general queries
+- Documents are scored but this endpoint doesn't show the actual scores (check server logs with `[ENRUTADOR]` prefix for score details)
+- Query expansion happens automatically for temporal queries ("cuándo" → adds "periodicidad", "plazo", "hábil")

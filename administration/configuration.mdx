@@ -1,0 +1,293 @@
+---
+title: System Configuration
+description: Complete configuration reference for SIAA proxy server
+icon: sliders
+---
+
+## Overview
+
+SIAA v2.1.25 is configured through a combination of constants defined in `siaa_proxy.py` and environment variables. This page covers all configuration parameters and their recommended values.
+
+## Core Configuration Constants
+
+### Ollama Connection
+
+These settings control how SIAA connects to the Ollama AI service:
+
+```python
+OLLAMA_URL = "http://localhost:11434"
+MODEL = "qwen2.5:3b"
+VERSION = "2.1.25"
+```
+
+<ParamField path="OLLAMA_URL" type="string" default="http://localhost:11434">
+  Base URL for the Ollama API endpoint. Must be accessible from the SIAA server.
+</ParamField>
+
+<ParamField path="MODEL" type="string" default="qwen2.5:3b">
+  Ollama model identifier. The 3B parameter model provides optimal balance between speed and quality for Spanish judicial text.
+</ParamField>
+
+<ParamField path="VERSION" type="string" default="2.1.25">
+  SIAA system version. Displayed in status endpoint and startup banner.
+</ParamField>
+
+### File Paths
+
+```python
+CARPETA_FUENTES = "/opt/siaa/fuentes"
+LOG_ARCHIVO = "/opt/siaa/logs/calidad.jsonl"
+```
+
+<ParamField path="CARPETA_FUENTES" type="string" default="/opt/siaa/fuentes">
+  Root directory containing source documents (.md and .txt files). Subdirectories are treated as separate collections.
+</ParamField>
+
+<ParamField path="LOG_ARCHIVO" type="string" default="/opt/siaa/logs/calidad.jsonl">
+  Path to the quality monitoring log file. Contains one JSON record per query.
+</ParamField>
+
+<Warning>
+  The parent directory for `LOG_ARCHIVO` must exist or have write permissions for automatic creation.
+</Warning>
+
+### Document Processing
+
+These parameters control how documents are chunked and processed:
+
+```python
+CHUNK_SIZE = 800              # Maximum characters per chunk
+CHUNK_OVERLAP = 300           # Overlapping characters between chunks
+MAX_CHUNKS_CONTEXTO = 3       # Chunks sent to model per document
+MAX_DOCS_CONTEXTO = 2         # Maximum documents used per query
+```
+
+<ParamField path="CHUNK_SIZE" type="integer" default="800">
+  Maximum size of each text chunk in characters. Larger values provide more context but increase processing time.
+</ParamField>
+
+<ParamField path="CHUNK_OVERLAP" type="integer" default="300">
+  Number of overlapping characters between consecutive chunks. Prevents splitting articles or procedures across chunk boundaries.
+</ParamField>
+
+<ParamField path="MAX_CHUNKS_CONTEXTO" type="integer" default="3">
+  Maximum chunks sent to the AI model per document. Automatically increased to 4 for documents with &gt;80 chunks.
+  
+  - **Francotirador mode** (ratio ≥3.0): 1 chunk ≈ 800 chars
+  - **Binóculo mode** (ratio ≥1.8): 2 chunks ≈ 1,600 chars
+  - **Escopeta mode** (ratio &lt;1.8): 3 chunks ≈ 2,400 chars
+</ParamField>
+
+<ParamField path="MAX_DOCS_CONTEXTO" type="integer" default="2">
+  Maximum number of documents retrieved per query. Set to 1 when specific document patterns (PSAA, PCSJA, acuerdo) are detected.
+</ParamField>
+
+### Cache Configuration
+
+```python
+CACHE_MAX_ENTRADAS = 200      # Maximum cached responses
+CACHE_TTL_SEGUNDOS = 3600     # Cache entry lifetime (1 hour)
+CACHE_SOLO_DOC = True         # Only cache document queries
+```
+
+<ParamField path="CACHE_MAX_ENTRADAS" type="integer" default="200">
+  Maximum number of responses stored in cache. Uses LRU (Least Recently Used) eviction policy.
+</ParamField>
+
+<ParamField path="CACHE_TTL_SEGUNDOS" type="integer" default="3600">
+  Time-to-live for cache entries in seconds. Default is 1 hour (3600s). Expired entries are automatically removed.
+</ParamField>
+
+<ParamField path="CACHE_SOLO_DOC" type="boolean" default="true">
+  When `true`, only document-based queries are cached. Conversational queries (greetings, etc.) are never cached.
+</ParamField>
+
+<Info>
+  Cache hit rate of 30-40% is expected across 26 judicial offices making similar queries. Cache hits return responses in ~5ms vs ~44s without cache.
+</Info>
+
+### Network & Timeout Settings
+
+```python
+TIMEOUT_CONEXION = 8          # Connection timeout (seconds)
+TIMEOUT_RESPUESTA = 180       # Response timeout (seconds)
+TIMEOUT_HEALTH = 5            # Health check timeout (seconds)
+MAX_OLLAMA_SIMULTANEOS = 2    # Concurrent Ollama requests
+HILOS_SERVIDOR = 16           # Server thread pool size
+```
+
+<ParamField path="TIMEOUT_CONEXION" type="integer" default="8">
+  Timeout for establishing connection to Ollama in seconds.
+</ParamField>
+
+<ParamField path="TIMEOUT_RESPUESTA" type="integer" default="180">
+  Maximum time to wait for Ollama response in seconds (3 minutes).
+</ParamField>
+
+<ParamField path="TIMEOUT_HEALTH" type="integer" default="5">
+  Timeout for Ollama health check requests in seconds.
+</ParamField>
+
+<ParamField path="MAX_OLLAMA_SIMULTANEOS" type="integer" default="2">
+  Maximum number of concurrent requests to Ollama. Prevents resource exhaustion on the AI service.
+</ParamField>
+
+<ParamField path="HILOS_SERVIDOR" type="integer" default="16">
+  Thread pool size for the Waitress WSGI server. Controls maximum concurrent client connections.
+</ParamField>
+
+### Logging Configuration
+
+```python
+LOG_MAX_LINEAS = 5000         # Maximum log entries before rotation
+```
+
+<ParamField path="LOG_MAX_LINEAS" type="integer" default="5000">
+  Maximum number of entries in the quality log before automatic rotation. When limit is reached, only the most recent 4,000 entries are kept.
+</ParamField>
+
+## Environment Variables
+
+SIAA reads optional environment variables for deployment-specific configuration:
+
+```bash
+export SIAA_SERVER_IP="192.168.1.100"
+export SIAA_SERVER_PORT="5000"
+```
+
+<ParamField path="SIAA_SERVER_IP" type="string" default="">
+  Real IP address of the SIAA server. Used for generating document links in responses. If empty, falls back to `request.host` (may fail behind reverse proxy).
+</ParamField>
+
+<ParamField path="SIAA_SERVER_PORT" type="string" default="5000">
+  Port exposed to browsers. Use `"80"` if behind Nginx reverse proxy, `"5000"` for direct access.
+</ParamField>
+
+### Example: Setting Environment Variables
+
+<CodeGroup>
+
+```bash bash
+# Set before starting SIAA
+export SIAA_SERVER_IP="192.168.1.100"
+export SIAA_SERVER_PORT="80"
+python siaa_proxy.py
+```
+
+```bash systemd
+# In /etc/systemd/system/siaa.service
+[Service]
+Environment="SIAA_SERVER_IP=192.168.1.100"
+Environment="SIAA_SERVER_PORT=80"
+ExecStart=/usr/bin/python3 /opt/siaa/siaa_proxy.py
+```
+
+</CodeGroup>
+
+## Flask Application Configuration
+
+SIAA runs as a Flask application with CORS enabled:
+
+```python
+app = Flask(__name__)
+CORS(app)  # Cross-Origin Resource Sharing enabled for all routes
+```
+
+The server uses **Waitress** as the production WSGI server:
+
+```python
+from waitress import serve
+serve(app, host="0.0.0.0", port=5000,
+      threads=HILOS_SERVIDOR, channel_timeout=200)
+```
+
+## Directory Structure Requirements
+
+### Document Source Directory
+
+The `CARPETA_FUENTES` directory should follow this structure:
+
+```
+/opt/siaa/fuentes/
+├── documento1.md              # General collection
+├── documento2.txt             # General collection
+├── acuerdo_psaa16-10476.md   # General collection
+└── normativa/                 # Named collection
+    ├── circular_001.md
+    └── resolucion_002.md
+```
+
+<Note>
+  - Root-level files belong to the "general" collection
+  - Subdirectories create named collections (e.g., "normativa")
+  - Only `.md` and `.txt` files are processed
+  - File encoding should be UTF-8
+</Note>
+
+### Log Directory
+
+Create the log directory with appropriate permissions:
+
+```bash
+sudo mkdir -p /opt/siaa/logs
+sudo chown siaa:siaa /opt/siaa/logs
+sudo chmod 755 /opt/siaa/logs
+```
+
+## Performance Tuning
+
+### Optimizing for Response Speed
+
+For faster responses (target &lt;30s):
+
+```python
+CHUNK_SIZE = 800              # Smaller chunks = faster processing
+MAX_CHUNKS_CONTEXTO = 3       # Limit context size
+MAX_DOCS_CONTEXTO = 2         # Fewer documents per query
+```
+
+### Optimizing for Accuracy
+
+For more comprehensive responses:
+
+```python
+CHUNK_SIZE = 1200             # Larger chunks = more context
+MAX_CHUNKS_CONTEXTO = 4       # More chunks per document
+MAX_DOCS_CONTEXTO = 3         # More documents per query
+```
+
+<Warning>
+  Increasing context size improves accuracy but may cause slower responses and potential timeouts. Monitor response times via `/siaa/log` endpoint.
+</Warning>
+
+## Configuration Verification
+
+Verify your configuration at startup by checking the banner output:
+
+```bash
+==============================================================
+  SIAA — Proxy Inteligente v2.1.25
+  Sistema Inteligente de Apoyo Administrativo
+  Seccional Bucaramanga — Rama Judicial
+==============================================================
+  Modelo:         qwen2.5:3b
+  Fuentes:        /opt/siaa/fuentes
+  Chunk size:     800 chars
+  Chunk overlap:  300 chars
+  Max chunks/doc: 3
+  Tokenizador:    alfanumérico + números ≥4 dígitos
+  Artículo bonus: +10 con grado°, +5 sin grado
+  Doc específico: max_docs=1 para PSAA/PCSJA/acuerdo
+==============================================================
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Monitoring" icon="chart-line" href="/administration/monitoring">
+    Learn how to monitor system health and performance
+  </Card>
+  <Card title="Log Analysis" icon="file-lines" href="/administration/log-analysis">
+    Analyze quality logs and query performance
+  </Card>
+</CardGroup>

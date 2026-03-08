@@ -1,0 +1,231 @@
+---
+title: 'GET /siaa/ver/<nombre_doc>'
+description: 'View full document content with optional highlighting'
+---
+
+## Overview
+
+The `/siaa/ver/<nombre_doc>` endpoint serves complete document content as a formatted HTML page. It supports section highlighting and search term emphasis, and is typically accessed via links in chat responses.
+
+## Endpoint
+
+```
+GET /siaa/ver/<nombre_doc>
+```
+
+## Path Parameters
+
+<ParamField path="nombre_doc" type="string" required>
+  Document filename (lowercase). Examples:
+  - `acuerdo_no._psaa16-10476.md`
+  - `juzgado_civil_municipal.md`
+  - `circular_cendoj_10-2022.md`
+</ParamField>
+
+## Query Parameters
+
+<ParamField query="sec" type="string">
+  Section to highlight and scroll to. The first occurrence matching this string (case-insensitive) will be highlighted and brought into view.
+  
+  Example: `?sec=ARTÍCULO 8`
+</ParamField>
+
+<ParamField query="q" type="string">
+  Search query for keyword highlighting (future enhancement - currently not implemented but reserved)
+</ParamField>
+
+## Response
+
+Returns a fully-formatted HTML page with:
+
+- **Branded header**: SIAA branding with document name and collection badge
+- **Markdown rendering**: Headings, bold, italic, lists
+- **Section highlighting**: Yellow highlight on target section with smooth scroll
+- **Print button**: Floating print button (hidden on print)
+- **Responsive design**: Mobile-friendly layout
+
+### Response Headers
+
+<ResponseField name="Content-Type" type="string">
+  `text/html; charset=utf-8`
+</ResponseField>
+
+### HTML Structure
+
+The rendered page includes:
+
+```html
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>[Document Name]</title>
+  <style>/* Judicial branding: blue/gold theme */</style>
+</head>
+<body>
+  <header>
+    <h1>📄 [Document Name] <span class="badge">[Collection]</span></h1>
+    <span>SIAA · Seccional Bucaramanga</span>
+  </header>
+  <div class="contenido">
+    <!-- Formatted document content -->
+  </div>
+  <button class="btn-imprimir" onclick="window.print()">🖨 Imprimir</button>
+  <!-- Auto-scroll script if ?sec= provided -->
+</body>
+</html>
+```
+
+## Error Responses
+
+### 404 Not Found
+
+Returned when the document doesn't exist:
+
+```html
+<h2 style='font-family:sans-serif;color:#b91c1c'>
+  Documento 'example.md' no encontrado.
+</h2>
+```
+
+## Examples
+
+### Example 1: View Full Document
+
+```bash
+curl http://localhost:5000/siaa/ver/acuerdo_no._psaa16-10476.md
+```
+
+Returns the full HTML page with the complete PSAA16-10476 agreement.
+
+### Example 2: View with Section Highlight
+
+```bash
+curl "http://localhost:5000/siaa/ver/acuerdo_no._psaa16-10476.md?sec=ARTÍCULO%205"
+```
+
+Returns the document with:
+- Article 5 highlighted in yellow
+- Page automatically scrolled to Article 5
+- Highlight blinks 3 times to draw attention
+
+### Example 3: Open in Browser
+
+```bash
+open "http://192.168.1.100:5000/siaa/ver/juzgado_civil_municipal.md"
+```
+
+Opens the document in the default browser (macOS). Use `xdg-open` on Linux or `start` on Windows.
+
+### Example 4: Access from Chat Response
+
+Chat responses include clickable links:
+
+```markdown
+📄 **Fuente:** ACUERDO_NO._PSAA16-10476
+
+[📖 Ver ACUERDO_NO._PSAA16-10476](http://192.168.1.100:5000/siaa/ver/acuerdo_no._psaa16-10476.md)
+```
+
+Clicking the link opens the full document in a new tab.
+
+## Use Cases
+
+### 1. Verify AI Response
+
+When SIAA cites a document, users can click the link to verify the source and read the full context.
+
+### 2. Read Complete Regulations
+
+For queries like "¿Cuáles son las secciones del formulario SIERJU?", the chat may return a summary. The document link lets users read the complete enumeration.
+
+### 3. Print Legal Documents
+
+The print button provides a clean, printer-friendly version without headers or buttons.
+
+### 4. Navigate to Specific Articles
+
+When SIAA responds "según Artículo 5°", the citation link can include `?sec=ARTÍCULO 5` to jump directly to that section.
+
+## Document Format Support
+
+The endpoint processes `.md` and `.txt` files from `/opt/siaa/fuentes/`:
+
+- **Markdown headings**: `#`, `##`, `###`, `####` rendered as `<h1>` through `<h4>`
+- **Bold text**: `**text**` rendered as `<strong>`
+- **Italic text**: `_text_` rendered as `<em>`
+- **Paragraphs**: Automatic `<p>` wrapping
+- **Blank lines**: Preserved as spacing
+
+## Styling
+
+The page uses a judicial theme:
+
+- **Colors**:
+  - Primary blue: `#1a2a6c` (header background)
+  - Gold accent: `#c5a059` (badges, borders, highlights)
+  - Text: `#1e293b` (dark slate)
+  
+- **Typography**:
+  - Font: Segoe UI (sans-serif fallback)
+  - Line height: 1.75 for readability
+  - Headings: Blue with gold left border on `<h2>`
+
+- **Highlight effect**:
+  - Background: `#fef9c3` (yellow-50)
+  - Border: 5px solid gold on left
+  - Animation: Blinks between yellow-50 and yellow-400, 3 times
+
+## Technical Details
+
+### Document Lookup
+
+The endpoint performs fuzzy matching:
+
+1. **Exact match**: `nombre_doc.lower()` matches document key
+2. **Fuzzy match**: If exact fails, searches for partial matches with underscores/spaces normalized
+
+This allows flexible URLs like:
+- `/siaa/ver/acuerdo no. psaa16-10476.md`
+- `/siaa/ver/acuerdo_no._psaa16-10476.md`
+
+Both resolve to the same document.
+
+### Section Highlighting
+
+The `sec` parameter performs:
+
+1. **Case-insensitive search**: "artículo 5" matches "ARTÍCULO 5°"
+2. **First match only**: Only the first occurrence is highlighted
+3. **Smooth scroll**: JavaScript `scrollIntoView({behavior:"smooth", block:"center"})`
+4. **Visual emphasis**: Blink animation draws user's eye
+
+### Print Optimization
+
+`@media print` CSS rules:
+- Hide header and print button
+- Remove padding for more content per page
+- Preserve text formatting and structure
+
+## Integration Example
+
+Typical flow when a user asks a question:
+
+1. **User query**: "¿Qué sanciones hay por incumplimiento?"
+2. **SIAA response**:
+   ```
+   El incumplimiento acarreará las sanciones disciplinarias previstas 
+   en el Código Disciplinario Único (Artículo 19, PSAA16-10476).
+   
+   📄 **Fuente:** ACUERDO_NO._PSAA16-10476
+   
+   [📖 Ver ACUERDO_NO._PSAA16-10476](http://192.168.1.100:5000/siaa/ver/acuerdo_no._psaa16-10476.md?sec=ARTÍCULO 19)
+   ```
+3. **User clicks link**: Browser opens full document scrolled to Article 19
+4. **User reviews**: Reads full article in context, can print if needed
+
+## Related Endpoints
+
+- [POST /siaa/chat](/api/chat) - Generates links to this endpoint in citations
+- [GET /siaa/recargar](/api/reload) - Reload documents after updates
+- [GET /siaa/status](/api/status) - Check which documents are loaded

@@ -1,0 +1,428 @@
+---
+title: 'GET /siaa/log'
+description: 'Query quality monitoring logs with filtering'
+---
+
+## Overview
+
+The `/siaa/log` endpoint provides access to the quality monitoring system, which logs every query processed by SIAA. Each log entry includes the question, response preview, documents used, response time, and automatic quality alerts.
+
+## Endpoint
+
+```
+GET /siaa/log
+```
+
+## Query Parameters
+
+<ParamField query="n" type="number" default="50">
+  Number of recent entries to return. Maximum: 500, Default: 50
+</ParamField>
+
+<ParamField query="tipo" type="string">
+  Filter by query type. Case-insensitive. Options:
+  - `CONV` - Conversational queries (greetings, general questions)
+  - `DOC` - Document-based queries
+  - `CACHE_HIT` - Queries served from cache
+  - `ERROR` - Queries that resulted in errors
+</ParamField>
+
+<ParamField query="alerta" type="string">
+  Filter by alert level. Case-insensitive. Options:
+  - `OK` - Normal operation, good response
+  - `POSIBLE_ALUCINACION` - Model said "no encontré" but documents were available
+  - `SIN_CONTEXTO` - No documents found (expected "no encontré")
+  - `ERROR` - System error during processing
+</ParamField>
+
+<ParamField query="formato" type="string" default="json">
+  Output format:
+  - `json` - Structured JSON response (default)
+  - `txt` - Plain text for terminal viewing
+</ParamField>
+
+## Response (JSON Format)
+
+<ResponseField name="resumen" type="object">
+  Summary statistics across all logged queries:
+  
+  <ResponseField name="total_consultas" type="number">
+    Total queries logged in the system
+  </ResponseField>
+  
+  <ResponseField name="errores" type="number">
+    Number of queries with ERROR alert
+  </ResponseField>
+  
+  <ResponseField name="posibles_alucinaciones" type="number">
+    Number of queries with POSIBLE_ALUCINACION alert
+  </ResponseField>
+  
+  <ResponseField name="cache_hits" type="number">
+    Number of queries served from cache
+  </ResponseField>
+  
+  <ResponseField name="tiempo_promedio_s" type="number">
+    Average response time in seconds
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="entradas" type="array">
+  Array of log entries (newest first), each containing:
+  
+  <ResponseField name="ts" type="string">
+    Timestamp in ISO 8601 format: `"2024-03-15T14:23:45"`
+  </ResponseField>
+  
+  <ResponseField name="tipo" type="string">
+    Query type: `"CONV"`, `"DOC"`, `"CACHE_HIT"`, or `"ERROR"`
+  </ResponseField>
+  
+  <ResponseField name="alerta" type="string">
+    Quality alert: `"OK"`, `"POSIBLE_ALUCINACION"`, `"SIN_CONTEXTO"`, or `"ERROR"`
+  </ResponseField>
+  
+  <ResponseField name="pregunta" type="string">
+    User question (truncated to 200 characters)
+  </ResponseField>
+  
+  <ResponseField name="respuesta" type="string">
+    Response preview (first 300 characters)
+  </ResponseField>
+  
+  <ResponseField name="docs" type="array">
+    Array of document filenames used to generate the response
+  </ResponseField>
+  
+  <ResponseField name="ctx_chars" type="number">
+    Number of context characters sent to the model
+  </ResponseField>
+  
+  <ResponseField name="tiempo_s" type="number">
+    Response generation time in seconds
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="mostrando" type="number">
+  Number of entries returned (may be less than `n` if filtered)
+</ResponseField>
+
+## Example Response (JSON)
+
+```json
+{
+  "resumen": {
+    "total_consultas": 1847,
+    "errores": 12,
+    "posibles_alucinaciones": 8,
+    "cache_hits": 245,
+    "tiempo_promedio_s": 18.4
+  },
+  "entradas": [
+    {
+      "ts": "2024-03-15T14:23:45",
+      "tipo": "DOC",
+      "alerta": "OK",
+      "pregunta": "¿Cuándo debo reportar en SIERJU?",
+      "respuesta": "El reporte debe realizarse el quinto día hábil de cada mes, según el artículo 3 del Acuerdo PSAA16-10476.\n\n📄 **Fuente:** ACUERDO_NO._PSAA16-10476",
+      "docs": [
+        "acuerdo_no._psaa16-10476.md"
+      ],
+      "ctx_chars": 2387,
+      "tiempo_s": 22.5
+    },
+    {
+      "ts": "2024-03-15T14:22:10",
+      "tipo": "CACHE_HIT",
+      "alerta": "OK",
+      "pregunta": "cuando reportar sierju",
+      "respuesta": "El reporte debe realizarse el quinto día hábil de cada mes, según el artículo 3 del Acuerdo PSAA16-10476.\n\n📄 **Fuente:** ACUERDO_NO._PSAA16-10476",
+      "docs": [],
+      "ctx_chars": 0,
+      "tiempo_s": 0.0
+    },
+    {
+      "ts": "2024-03-15T14:18:33",
+      "tipo": "DOC",
+      "alerta": "POSIBLE_ALUCINACION",
+      "pregunta": "¿Qué dice el artículo 12 sobre vacaciones?",
+      "respuesta": "No encontré esa información en los documentos disponibles.",
+      "docs": [
+        "acuerdo_no._psaa16-10476.md"
+      ],
+      "ctx_chars": 1654,
+      "tiempo_s": 19.8
+    }
+  ],
+  "mostrando": 3
+}
+```
+
+## Response (Text Format)
+
+When `formato=txt`, the response is plain text optimized for terminal viewing:
+
+```
+=== Log SIAA — últimas 3 de 1847 consultas ===
+Errores: 12 | Posibles alucinaciones: 8 | Cache hits: 245 | T.prom: 18.4s
+
+[2024-03-15T14:23:45] DOC 22.5s
+  P: ¿Cuándo debo reportar en SIERJU?
+  R: El reporte debe realizarse el quinto día hábil de cada mes, según el artículo 3 del Acue...
+  Docs: ['acuerdo_no._psaa16-10476.md']
+
+[2024-03-15T14:22:10] CACHE_HIT 0.0s
+  P: cuando reportar sierju
+  R: El reporte debe realizarse el quinto día hábil de cada mes, según el artículo 3 del Acue...
+  Docs: []
+
+[2024-03-15T14:18:33] ⚠ [POSIBLE_ALUCINACION] DOC 19.8s
+  P: ¿Qué dice el artículo 12 sobre vacaciones?
+  R: No encontré esa información en los documentos disponibles.
+  Docs: ['acuerdo_no._psaa16-10476.md']
+```
+
+## Alert Types
+
+### OK
+
+Normal operation. The system found relevant documents and generated a proper response.
+
+### POSIBLE_ALUCINACION
+
+**Detection logic**: The model responded "No encontré esa información" BUT the system found documents (>100 chars context).
+
+**Possible causes**:
+1. Documents were relevant but didn't contain the specific answer
+2. Chunk selection missed the relevant section
+3. Model failed to extract information from context
+4. Question was too specific for available documents
+
+**Investigation**:
+```bash
+# List all possible hallucinations
+curl "http://localhost:5000/siaa/log?alerta=POSIBLE_ALUCINACION&n=100"
+```
+
+### SIN_CONTEXTO
+
+**Detection logic**: The model responded "No encontré" AND no documents were found.
+
+**Meaning**: Expected behavior. The query didn't match any documents in the index.
+
+**Possible causes**:
+1. Query about topics not covered in document corpus
+2. Misspelled document names or references
+3. Query requires documents not yet uploaded
+
+### ERROR
+
+**Detection logic**: Exception occurred during query processing.
+
+**Investigation**:
+```bash
+# List all errors
+curl "http://localhost:5000/siaa/log?tipo=ERROR&n=50"
+```
+
+Check server logs for stack traces:
+```bash
+journalctl -u siaa -n 100 | grep ERROR
+```
+
+## Usage Examples
+
+### Example 1: Recent Activity
+
+```bash
+curl "http://localhost:5000/siaa/log?n=20"
+```
+
+Shows the last 20 queries in JSON format.
+
+### Example 2: Check for Quality Issues
+
+```bash
+curl "http://localhost:5000/siaa/log?alerta=POSIBLE_ALUCINACION&n=100" | jq '.entradas[].pregunta'
+```
+
+Lists questions that triggered possible hallucination alerts.
+
+### Example 3: Monitor Errors
+
+```bash
+curl "http://localhost:5000/siaa/log?tipo=ERROR&formato=txt"
+```
+
+Displays recent errors in readable text format.
+
+### Example 4: Cache Performance
+
+```bash
+curl "http://localhost:5000/siaa/log?tipo=CACHE_HIT&n=200" | jq '.mostrando'
+```
+
+Counts cache hits in the last 200 queries (or all if &lt;200 total).
+
+### Example 5: Slow Queries
+
+```bash
+curl "http://localhost:5000/siaa/log?n=500" | jq '.entradas[] | select(.tiempo_s > 30) | {pregunta, tiempo_s, docs}'
+```
+
+Finds queries that took longer than 30 seconds.
+
+### Example 6: Document Usage Analysis
+
+```bash
+curl "http://localhost:5000/siaa/log?tipo=DOC&n=500" | jq '[.entradas[].docs[]] | group_by(.) | map({doc: .[0], count: length}) | sort_by(.count) | reverse'
+```
+
+Ranks documents by how often they're used in responses.
+
+### Example 7: Terminal Monitoring
+
+```bash
+watch -n 5 'curl -s "http://localhost:5000/siaa/log?n=10&formato=txt"'
+```
+
+Refreshes every 5 seconds to show live query activity.
+
+## Log File Details
+
+### File Location
+
+```
+/opt/siaa/logs/calidad.jsonl
+```
+
+### Format
+
+JSONL (JSON Lines) - one JSON object per line:
+
+```jsonl
+{"ts":"2024-03-15T14:23:45","tipo":"DOC","alerta":"OK","pregunta":"...","respuesta":"...","docs":[...],"ctx_chars":2387,"tiempo_s":22.5}
+{"ts":"2024-03-15T14:22:10","tipo":"CACHE_HIT","alerta":"OK","pregunta":"...","respuesta":"...","docs":[],"ctx_chars":0,"tiempo_s":0.0}
+```
+
+### Rotation
+
+Logs automatically rotate when reaching 5000 entries:
+- **Trigger**: 5000 lines (~2 MB)
+- **Action**: Keep most recent 4000 lines, discard oldest 1000
+- **Purpose**: Prevent unbounded disk growth while retaining recent history
+
+### Direct File Access
+
+You can also query the log file directly with standard tools:
+
+```bash
+# Last 10 entries
+tail -10 /opt/siaa/logs/calidad.jsonl
+
+# Count queries by type
+jq -r .tipo /opt/siaa/logs/calidad.jsonl | sort | uniq -c
+
+# Average response time
+jq -s '[.[].tiempo_s] | add / length' /opt/siaa/logs/calidad.jsonl
+
+# Filter by date
+grep '2024-03-15' /opt/siaa/logs/calidad.jsonl
+```
+
+## Quality Monitoring Workflows
+
+### Daily Quality Report
+
+```bash
+#!/bin/bash
+# Script: daily_quality_report.sh
+
+DATE=$(date +%Y-%m-%d)
+LOG=$(curl -s "http://localhost:5000/siaa/log?n=500")
+
+echo "=== SIAA Quality Report - $DATE ==="
+echo
+
+echo "Summary:"
+echo $LOG | jq '.resumen'
+
+echo
+echo "Alerts:"
+echo $LOG | jq '.entradas[] | select(.alerta != "OK") | {ts, alerta, pregunta}'
+
+echo
+echo "Slow queries (>25s):"
+echo $LOG | jq '.entradas[] | select(.tiempo_s > 25) | {pregunta, tiempo_s}'
+```
+
+### Real-time Alert Monitoring
+
+```bash
+#!/bin/bash
+# Script: monitor_alerts.sh
+
+tail -f /opt/siaa/logs/calidad.jsonl | while read line; do
+  ALERTA=$(echo $line | jq -r '.alerta')
+  if [ "$ALERTA" != "OK" ]; then
+    PREGUNTA=$(echo $line | jq -r '.pregunta')
+    echo "[ALERT] $ALERTA: $PREGUNTA"
+    # Optional: send to monitoring system
+    # curl -X POST https://monitoring.example.com/alerts -d "$line"
+  fi
+done
+```
+
+### Response Time Percentiles
+
+```bash
+curl -s "http://localhost:5000/siaa/log?n=500" | jq -r '.entradas[].tiempo_s' | sort -n | awk '
+BEGIN { count = 0 }
+{ 
+  times[count++] = $1 
+}
+END {
+  print "P50 (median): " times[int(count*0.5)]
+  print "P90: " times[int(count*0.9)]
+  print "P95: " times[int(count*0.95)]
+  print "P99: " times[int(count*0.99)]
+}'
+```
+
+## Integration with Monitoring Systems
+
+### Export to Prometheus
+
+```python
+# prometheus_exporter.py
+import requests
+from prometheus_client import Gauge, start_http_server
+
+log_data = requests.get('http://localhost:5000/siaa/log?n=500').json()
+resumen = log_data['resumen']
+
+total_queries = Gauge('siaa_total_queries', 'Total queries processed')
+errors = Gauge('siaa_errors', 'Number of errors')
+avg_time = Gauge('siaa_avg_response_time', 'Average response time')
+
+total_queries.set(resumen['total_consultas'])
+errors.set(resumen['errores'])
+avg_time.set(resumen['tiempo_promedio_s'])
+
+start_http_server(9090)
+```
+
+### Export to CSV for Analysis
+
+```bash
+curl -s "http://localhost:5000/siaa/log?n=1000" | jq -r '.entradas[] | [.ts, .tipo, .alerta, .pregunta, .tiempo_s] | @csv' > siaa_logs.csv
+```
+
+Import into Excel, Google Sheets, or data analysis tools.
+
+## Related Endpoints
+
+- [POST /siaa/chat](/api/chat) - Generates log entries for each query
+- [GET /siaa/status](/api/status) - Overall system health (includes cache stats)
+- [GET /siaa/cache](/api/cache) - Cache-specific statistics
+- [GET /siaa/recargar](/api/reload) - Reload documents (may affect future log entries)

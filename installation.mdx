@@ -1,0 +1,315 @@
+---
+title: "Installation"
+description: "Complete installation guide for SIAA judicial document management system"
+---
+
+## Overview
+
+SIAA (Sistema Inteligente de Apoyo Administrativo) is an AI-powered judicial document management system that uses Ollama with the Qwen2.5:3b model for intelligent document search and question answering.
+
+## System Requirements
+
+<CardGroup cols={2}>
+  <Card title="Python" icon="python">
+    Python 3.8 or higher
+  </Card>
+  <Card title="LibreOffice" icon="file">
+    LibreOffice headless for document conversion
+  </Card>
+  <Card title="Tesseract" icon="image">
+    Tesseract OCR for scanned PDF processing
+  </Card>
+  <Card title="Ollama" icon="brain">
+    Ollama with Qwen2.5:3b model
+  </Card>
+</CardGroup>
+
+## Installation Steps
+
+<Steps>
+  <Step title="Install System Dependencies">
+    Install LibreOffice headless and Tesseract OCR on Fedora/RHEL:
+
+    ```bash
+    sudo dnf install libreoffice-headless tesseract tesseract-langpack-spa poppler-utils -y
+    ```
+
+    For Debian/Ubuntu:
+
+    ```bash
+    sudo apt install libreoffice-headless tesseract-ocr tesseract-ocr-spa poppler-utils -y
+    ```
+
+    <Note>
+      LibreOffice headless is required for converting `.doc` and `.pdf` files to `.docx` format.
+    </Note>
+  </Step>
+
+  <Step title="Install Python Dependencies">
+    Install required Python packages:
+
+    ```bash
+    pip install Flask flask-cors pandas python-docx pymupdf4llm \
+                pdf2image pytesseract openpyxl xlrd requests \
+                --break-system-packages
+    ```
+
+    <Warning>
+      The `--break-system-packages` flag is needed on Fedora 43 and similar systems with externally-managed Python environments.
+    </Warning>
+
+    ### Core Dependencies
+
+    - **Flask & flask-cors**: Web server and API framework
+    - **pandas**: Excel file processing
+    - **python-docx**: Word document parsing
+    - **pymupdf4llm**: PDF to Markdown conversion
+    - **pdf2image & pytesseract**: OCR for scanned documents
+    - **openpyxl & xlrd**: Excel format support
+  </Step>
+
+  <Step title="Install and Configure Ollama">
+    Install Ollama from [ollama.ai](https://ollama.ai):
+
+    ```bash
+    curl -fsSL https://ollama.ai/install.sh | sh
+    ```
+
+    Pull the Qwen2.5:3b model:
+
+    ```bash
+    ollama pull qwen2.5:3b
+    ```
+
+    <Note>
+      SIAA is configured to use the **qwen2.5:3b** model running on `http://localhost:11434`. This is defined in `siaa_proxy.py:182`.
+    </Note>
+
+    Verify the installation:
+
+    ```bash
+    ollama list
+    ```
+
+    You should see `qwen2.5:3b` in the output.
+  </Step>
+
+  <Step title="Create Directory Structure">
+    Create the required SIAA directories:
+
+    ```bash
+    sudo mkdir -p /opt/siaa/fuentes
+    sudo mkdir -p /opt/siaa/fuentes/normativa
+    sudo mkdir -p /opt/siaa/logs
+    sudo mkdir -p /opt/siaa/instructivos
+    sudo mkdir -p /opt/siaa/pdfs_origen
+    ```
+
+    Set appropriate permissions:
+
+    ```bash
+    sudo chown -R $USER:$USER /opt/siaa
+    ```
+
+    ### Directory Purpose
+
+    | Directory | Purpose |
+    |-----------|----------|
+    | `/opt/siaa/fuentes` | Converted Markdown documents for indexing |
+    | `/opt/siaa/fuentes/normativa` | Legal documents and norms |
+    | `/opt/siaa/logs` | System logs including quality monitoring |
+    | `/opt/siaa/instructivos` | Source Word/Excel files |
+    | `/opt/siaa/pdfs_origen` | PDF files for conversion |
+  </Step>
+
+  <Step title="Configure Environment Variables">
+    Set server IP and port (optional):
+
+    ```bash
+    export SIAA_SERVER_IP="192.168.1.100"
+    export SIAA_SERVER_PORT="5000"
+    ```
+
+    <Note>
+      These environment variables are read in `siaa_proxy.py:168-170`. If not set, the system uses the IP from the HTTP Host header and defaults to port 5000.
+    </Note>
+
+    To make these permanent, add them to `~/.bashrc` or `~/.profile`:
+
+    ```bash
+    echo 'export SIAA_SERVER_IP="192.168.1.100"' >> ~/.bashrc
+    echo 'export SIAA_SERVER_PORT="5000"' >> ~/.bashrc
+    source ~/.bashrc
+    ```
+  </Step>
+
+  <Step title="Deploy Source Files">
+    Copy the SIAA Python files to your deployment location:
+
+    ```bash
+    mkdir -p ~/siaa
+    cp siaa_proxy.py convertidor.py convertidor_pdf.py ~/siaa/
+    cp -r Web ~/siaa/
+    ```
+
+    The Web directory contains:
+    - `index.html`: Main web interface
+    - `index2121.html`: Alternative interface version
+    - `default.conf`: Nginx configuration template
+  </Step>
+</Steps>
+
+## Configuration Details
+
+### Proxy Server Settings
+
+The Flask proxy server (`siaa_proxy.py`) has the following key configuration:
+
+```python
+OLLAMA_URL             = "http://localhost:11434"
+MODEL                  = "qwen2.5:3b"
+CARPETA_FUENTES        = "/opt/siaa/fuentes"
+LOG_ARCHIVO            = "/opt/siaa/logs/calidad.jsonl"
+MAX_DOCS_CONTEXTO      = 2
+CHUNK_SIZE             = 800
+CHUNK_OVERLAP          = 300
+MAX_CHUNKS_CONTEXTO    = 3
+CACHE_MAX_ENTRADAS     = 200
+CACHE_TTL_SEGUNDOS     = 3600
+```
+
+<Note>
+  The cache system (LRU cache) stores up to 200 frequently-asked questions with a 1-hour TTL, providing responses in ~5ms vs 44s for uncached queries.
+</Note>
+
+### Document Converter Settings
+
+The document converter (`convertidor.py`) uses these default paths:
+
+```python
+DEFAULT_ORIGEN  = Path("/opt/siaa/instructivos")
+DEFAULT_DEST_MD = Path("/opt/siaa/fuentes")
+DEFAULT_DB      = Path("/opt/siaa/institucional.db")
+DEFAULT_LOG     = Path("/opt/siaa/logs/conversion_errores.log")
+TEMP_DIR        = Path("/tmp/siaa_temp")
+```
+
+### PDF Converter Settings
+
+The PDF converter (`convertidor_pdf.py`) configuration:
+
+```python
+CARPETA_ENTRADA = "/opt/siaa/pdfs_origen"
+CARPETA_SALIDA  = "/opt/siaa/fuentes/normativa"
+MIN_CHARS = 200   # Threshold for OCR fallback
+OCR_DPI   = 300
+OCR_LANG  = "spa"
+```
+
+## Verification
+
+Verify your installation:
+
+<CodeGroup>
+
+```bash Python Version
+python3 --version
+# Should show Python 3.8 or higher
+```
+
+```bash LibreOffice
+libreoffice --version
+# Should show LibreOffice version
+```
+
+```bash Tesseract
+tesseract --version
+# Should show Tesseract version with Spanish language pack
+```
+
+```bash Ollama
+ollama list
+# Should show qwen2.5:3b in the list
+```
+
+```bash Python Packages
+pip list | grep -E "Flask|pandas|docx|pymupdf"
+# Should show installed versions
+```
+
+</CodeGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart Guide" icon="rocket" href="/quickstart">
+    Learn how to start the system and make your first query
+  </Card>
+  <Card title="Document Conversion" icon="file-arrow-down" href="/document-processing/word-conversion">
+    Convert your institutional documents to Markdown
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Ollama connection failed">
+    Check if Ollama is running:
+
+    ```bash
+    systemctl status ollama
+    ```
+
+    Start Ollama if needed:
+
+    ```bash
+    systemctl start ollama
+    ```
+
+    Or run manually:
+
+    ```bash
+    ollama serve
+    ```
+  </Accordion>
+
+  <Accordion title="LibreOffice conversion errors">
+    Ensure LibreOffice headless is properly installed:
+
+    ```bash
+    which libreoffice
+    libreoffice --headless --version
+    ```
+
+    Test conversion manually:
+
+    ```bash
+    libreoffice --headless --convert-to docx --outdir /tmp test.doc
+    ```
+  </Accordion>
+
+  <Accordion title="Permission denied errors">
+    Check directory permissions:
+
+    ```bash
+    ls -la /opt/siaa
+    ```
+
+    Fix permissions:
+
+    ```bash
+    sudo chown -R $USER:$USER /opt/siaa
+    chmod -R 755 /opt/siaa
+    ```
+  </Accordion>
+
+  <Accordion title="Python package conflicts">
+    Use a virtual environment to isolate dependencies:
+
+    ```bash
+    python3 -m venv ~/siaa-env
+    source ~/siaa-env/bin/activate
+    pip install Flask flask-cors pandas python-docx pymupdf4llm pdf2image pytesseract openpyxl xlrd requests
+    ```
+  </Accordion>
+</AccordionGroup>

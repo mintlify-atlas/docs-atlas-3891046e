@@ -1,0 +1,297 @@
+---
+title: 'POST /siaa/chat'
+description: 'Streaming chat endpoint for conversational and document queries'
+---
+
+## Overview
+
+The `/siaa/chat` endpoint is the primary interface for interacting with SIAA. It processes both conversational queries (greetings, general questions) and document-based queries (procedural, regulatory questions), returning responses via Server-Sent Events (SSE) streaming.
+
+## Endpoint
+
+```
+POST /siaa/chat
+```
+
+## Request
+
+### Headers
+
+<ParamField header="Content-Type" type="string" required>
+  Must be `application/json`
+</ParamField>
+
+### Body Parameters
+
+<ParamField body="messages" type="array" required>
+  Array of message objects representing the conversation history. Each message object contains:
+  
+  <ParamField body="role" type="string" required>
+    Role of the message sender. Either `"user"` or `"assistant"`
+  </ParamField>
+  
+  <ParamField body="content" type="string" required>
+    The message content
+  </ParamField>
+</ParamField>
+
+### Example Request Body
+
+```json
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "¿Cuándo debo reportar en SIERJU?"
+    }
+  ]
+}
+```
+
+## Response
+
+The endpoint returns a **Server-Sent Events (SSE)** stream with `Content-Type: text/event-stream`.
+
+### Response Headers
+
+<ResponseField name="Content-Type" type="string">
+  `text/event-stream`
+</ResponseField>
+
+<ResponseField name="Cache-Control" type="string">
+  `no-cache`
+</ResponseField>
+
+<ResponseField name="X-Accel-Buffering" type="string">
+  `no` (prevents proxy buffering)
+</ResponseField>
+
+<ResponseField name="X-Cache" type="string">
+  Present with value `HIT` when the response is served from cache
+</ResponseField>
+
+### Stream Format
+
+Each chunk in the stream follows this format:
+
+```
+data: {"choices":[{"delta":{"content":"<token>"}}]}
+
+```
+
+The stream ends with:
+
+```
+data: [DONE]
+
+```
+
+### Example Response Stream
+
+```
+data: {"choices":[{"delta":{"content":"El"}}]}
+
+data: {"choices":[{"delta":{"content":" reporte"}}]}
+
+data: {"choices":[{"delta":{"content":" debe"}}]}
+
+data: {"choices":[{"delta":{"content":" realizarse"}}]}
+
+data: {"choices":[{"delta":{"content":" el"}}]}
+
+data: {"choices":[{"delta":{"content":" quinto"}}]}
+
+data: {"choices":[{"delta":{"content":" día"}}]}
+
+data: {"choices":[{"delta":{"content":" hábil"}}]}
+
+data: {"choices":[{"delta":{"content":".\n\n📄 **Fuente:** ACUERDO_NO._PSAA16-10476"}}]}
+
+data: [DONE]
+
+```
+
+## Query Types
+
+### Conversational Queries
+
+Short phrases like greetings, thanks, or questions about SIAA itself are handled conversationally without document search:
+
+- "Hola", "Buenos días"
+- "¿Qué es SIAA?"
+- "Gracias", "Adiós"
+
+### Document Queries
+
+Questions about judicial procedures, regulations, or administrative processes trigger document retrieval and RAG-based responses:
+
+- Questions containing judicial/technical terms (SIERJU, PSAA, acuerdo, juzgado, etc.)
+- Questions longer than 8 characters that aren't conversational
+
+### Clarification Responses
+
+When a query is ambiguous (e.g., "juzgado civil" without specifying municipal or circuito), SIAA responds with clarification options:
+
+```json
+{
+  "pregunta_clarificacion": "¿A qué tipo de Juzgado Civil se refiere su consulta?",
+  "opciones": [
+    "Juzgado Civil Municipal",
+    "Juzgado Civil del Circuito",
+    "Juzgado Civil del Circuito Especializado",
+    "Juzgado Civil de Ejecución de Sentencias",
+    "Juzgado de Familia"
+  ]
+}
+```
+
+## Cache Behavior
+
+**Cache Hit**: If the same question has been asked recently (within 1 hour), the cached response is returned with header `X-Cache: HIT`. Cache keys are normalized (case-insensitive, accent-insensitive, punctuation-removed).
+
+**Cache Miss**: New queries trigger:
+1. Document routing (TF-IDF + density + filename matching)
+2. Chunk extraction (sliding window with overlap)
+3. LLM inference (Ollama)
+4. Cache storage (if successful)
+
+**Cache Invalidation**:
+- TTL: 3600 seconds (1 hour)
+- LRU eviction when cache reaches 200 entries
+- Cleared on document reload
+- Negative responses ("no encontré") are NOT cached
+
+## Error Responses
+
+Error messages are streamed as SSE events:
+
+<ResponseField name="COLA_LLENA" type="string">
+  `⏳ Sistema ocupado. Intente en 30 segundos.` - Max concurrent requests reached
+</ResponseField>
+
+<ResponseField name="TIMEOUT_CONEXION" type="string">
+  `⚠ IA no responde. Intente de nuevo.` - Ollama connection timeout
+</ResponseField>
+
+<ResponseField name="TIMEOUT_RESPUESTA" type="string">
+  `⏱ Consulta tomó demasiado tiempo.` - Response generation timeout (180s)
+</ResponseField>
+
+<ResponseField name="OLLAMA_CAIDO" type="string">
+  `⚠ Servidor IA reiniciándose. Espere 1 minuto.` - Ollama service unavailable
+</ResponseField>
+
+## Examples
+
+### Example 1: Document Query
+
+```bash
+curl -X POST http://localhost:5000/siaa/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {
+        "role": "user",
+        "content": "¿Cuál es la periodicidad del reporte SIERJU?"
+      }
+    ]
+  }'
+```
+
+**Response** (SSE stream):
+```
+data: {"choices":[{"delta":{"content":"La periodicidad del reporte SIERJU es mensual. Debe presentarse el quinto día hábil de cada mes (Artículo 3, PSAA16-10476)."}}]}
+
+data: {"choices":[{"delta":{"content":"\n\n📄 **Fuente:** ACUERDO_NO._PSAA16-10476\n\n[📖 Ver ACUERDO_NO._PSAA16-10476](http://localhost:5000/siaa/ver/acuerdo_no._psaa16-10476.md)"}}]}
+
+data: [DONE]
+
+```
+
+### Example 2: Conversational Query
+
+```bash
+curl -X POST http://localhost:5000/siaa/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {
+        "role": "user",
+        "content": "¿Qué es SIAA?"
+      }
+    ]
+  }'
+```
+
+**Response**:
+```
+data: {"choices":[{"delta":{"content":"SIAA significa Sistema Inteligente de Apoyo Administrativo. Soy el asistente oficial de la Seccional Bucaramanga de la Rama Judicial de Colombia. Puedo ayudarle con consultas sobre procesos judiciales, administrativos y normativos."}}]}
+
+data: [DONE]
+
+```
+
+### Example 3: Multi-turn Conversation
+
+```bash
+curl -X POST http://localhost:5000/siaa/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {
+        "role": "user",
+        "content": "¿Quién debe cargar la información en SIERJU?"
+      },
+      {
+        "role": "assistant",
+        "content": "Según el artículo 5 del Acuerdo PSAA16-10476, la responsabilidad de cargar la información recae en el funcionario o magistrado titular del despacho."
+      },
+      {
+        "role": "user",
+        "content": "¿Puede hacerlo un asistente?"
+      }
+    ]
+  }'
+```
+
+## Implementation Notes
+
+### Document Routing
+
+The system uses a **multi-level routing algorithm**:
+
+1. **TF-IDF keywords** (auto-generated + manual)
+2. **Density index** (term frequency normalized by document)
+3. **Filename matching** (pattern detection for PSAA, PCSJA, acuerdo, etc.)
+
+### Chunk Selection Strategy
+
+Depending on query confidence, the system selects chunks dynamically:
+
+- **Francotirador** (ratio ≥3.0): 1 chunk (~800 chars) - high confidence
+- **Binóculo** (ratio ≥1.8): 2 chunks (~1600 chars) - medium confidence  
+- **Escopeta** (ratio &lt;1.8): 3 chunks (~2400 chars) - low confidence
+- **Listado** (enumeration queries): Minimum 2 chunks regardless of ratio
+
+### Context Window Management
+
+- `num_ctx` is dynamically adjusted based on context size:
+  - &lt;400 tokens: `num_ctx=1024`
+  - 400-900 tokens: `num_ctx=2048`
+  - &gt;900 tokens: `num_ctx=3072`
+
+### Quality Monitoring
+
+All queries are logged to `/opt/siaa/logs/calidad.jsonl` with:
+- Timestamp, query type, question, response preview
+- Documents used, context size, response time
+- Automatic alert detection (POSIBLE_ALUCINACION, SIN_CONTEXTO)
+
+## Rate Limiting
+
+The system enforces:
+- **Max concurrent Ollama requests**: 2 (configurable via `MAX_OLLAMA_SIMULTANEOS`)
+- **Connection timeout**: 8 seconds
+- **Response timeout**: 180 seconds
+
+Requests exceeding the concurrency limit receive `COLA_LLENA` error.

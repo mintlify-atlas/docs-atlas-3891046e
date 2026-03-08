@@ -1,0 +1,488 @@
+---
+title: Document Chunking Strategy
+description: Sliding window chunking with overlap for optimal context extraction
+---
+
+# Document Chunking Strategy
+
+SIAA uses a **sliding window chunking** approach with overlap to divide documents into semantically coherent fragments. This prevents critical information (like multi-step procedures or legal articles) from being split across boundaries.
+
+## Why Chunking?
+
+Documents can be 50-200 KB, but Ollama's context window is limited (2048-3072 tokens ≈ 8-12 KB). We need to:
+1. **Extract only relevant sections** instead of sending entire documents
+2. **Preserve context boundaries** (don't split articles mid-sentence)
+3. **Allow multiple matches** from different document sections
+
+### Chunking vs Paragraph Splitting
+
+**Old approach (v2.1.5)**: Split by `\n\n+` (blank lines)
+
+<Warning>
+**Problem**: Articles and procedures often span multiple paragraphs. Splitting on blank lines causes:
+- Step 3 of a 5-step procedure separated from steps 1-2
+- Article preamble separated from numbered clauses
+- Loss of section headers when ranking individual paragraphs
+</Warning>
+
+**New approach (v2.1.6+)**: Fixed-size chunks with overlap
+
+<Success>
+**Benefits**:
+- Guaranteed context continuity (overlap ensures no information lost at boundaries)
+- Consistent chunk sizes for predictable token usage
+- Section headers preserved via metadata
+- Procedures and articles stay together
+</Success>
+
+## Implementation
+
+### Configuration
+
+```python siaa_proxy.py
+# Chunk parameters
+CHUNK_SIZE = 800            # Characters per chunk
+CHUNK_OVERLAP = 300         # Overlap between consecutive chunks
+MAX_CHUNKS_CONTEXTO = 3     # Maximum chunks to send per document
+```
+
+**Memory calculation**: `MAX_CHUNKS_CONTEXTO × CHUNK_SIZE = 3 × 800 = 2,400 chars ≈ 600 tokens`
+
+With 2 documents: `2 × 600 = 1,200 tokens` (fits comfortably in 2048-token context window)
+
+### Chunking Function
+
+```python siaa_proxy.py
+def chunking_con_solapamiento(contenido: str) -> list:
+    """
+    Divide content into fixed-size chunks with overlap.
+    
+    Returns:
+        List of dicts: {"texto": str, "seccion": str, "indice": int}
+    """
+    chunks = []
+    inicio = 0
+    total = len(contenido)
+    idx = 0
+    
+    while inicio < total:
+        fin = min(inicio + CHUNK_SIZE, total)
+        
+        # Extend to next newline to avoid cutting words
+        if fin < total:
+            salto = contenido.find('\n', fin)
+            if salto != -1 and salto - fin < 100:
+                fin = salto
+        
+        texto_chunk = contenido[inicio:fin]
+        
+        # Determine active section from previous context
+        contexto_previo = contenido[max(0, inicio - 500):inicio]
+        seccion = _ultimo_encabezado(contexto_previo + texto_chunk)
+        
+        chunks.append({
+            "texto": texto_chunk,
+            "seccion": seccion,
+            "indice": idx,
+        })
+        
+        idx += 1
+        # Advance with overlap
+        inicio += CHUNK_SIZE - CHUNK_OVERLAP
+    
+    return chunks
+```
+
+### Section Header Preservation
+
+Each chunk remembers the last Markdown header seen before or within it:
+
+```python siaa_proxy.py
+def _ultimo_encabezado(texto: str) -> str:
+    """Find the last Markdown heading in text."""
+    encabezados = re.findall(r'^#{1,3}\s+(.+)$', texto, re.MULTILINE)
+    if encabezados:
+        # Remove markdown formatting (*_`) and uppercase
+        return re.sub(r'[*_`]', '', encabezados[-1]).strip().upper()
+    return "INICIO"
+```
+
+**Example**:
+```markdown
+## Artículo 5 — Responsabilidad de carga
+
+Los funcionarios responsables de diligenciar el formulario SIERJU son:
+1. Jueces de conocimiento
+2. Magistrados de sala
+3. ...
+```
+
+Chunk metadata:
+```python
+{
+    "texto": "Los funcionarios responsables de diligenciar...",
+    "seccion": "ARTÍCULO 5 — RESPONSABILIDAD DE CARGA",
+    "indice": 12
+}
+```
+
+This metadata appears in the context sent to Ollama:
+```
+[SEC: ARTÍCULO 5 — RESPONSABILIDAD DE CARGA | CHUNK: 12]
+Los funcionarios responsables de diligenciar el formulario SIERJU son:
+...
+```
+
+## Sliding Window Visualization
+
+```
+Document: [==================================================] 10,000 chars
+
+Chunk 0:  [========]                    (chars 0-800)
+Chunk 1:       [========]               (chars 500-1300)   ← 300 char overlap
+Chunk 2:            [========]          (chars 1000-1800)  ← 300 char overlap
+Chunk 3:                 [========]     (chars 1500-2300)
+...
+```
+
+**Overlap region** (chars 500-800 in example above) appears in BOTH chunk 0 and chunk 1. This ensures:
+- If a sentence starts at char 750, it's complete in chunk 1
+- If a list starts at char 600, items aren't split between chunks
+
+## Pre-computation at Startup
+
+Chunks are calculated once when documents load, not on every query:
+
+```python siaa_proxy.py
+chunks_por_doc = {}  # Global index: {doc_name: [chunk1, chunk2, ...]}
+chunks_lock = threading.Lock()
+
+def cargar_documentos():
+    nuevos_chunks = {}
+    
+    for ruta in archivos:
+        nombre_clave = os.path.basename(ruta).lower()
+        with open(ruta, "r", encoding="utf-8") as f:
+            contenido = f.read()
+        
+        # Pre-calculate chunks with overlap
+        chunks = chunking_con_solapamiento(contenido)
+        nuevos_chunks[nombre_clave] = chunks
+        
+        print(
+            f"  [Doc] {nombre_clave} "
+            f"({len(contenido):,} chars, {len(chunks)} chunks)"
+        )
+    
+    with chunks_lock:
+        chunks_por_doc = nuevos_chunks
+```
+
+**Startup log example**:
+```
+[Doc] acuerdo_no._psaa16-10476.md (45,231 chars, 38 chunks)
+[Doc] acuerdo_pcsja19-11207.md (12,847 chars, 11 chunks)
+[Doc] manual_procedimientos.md (28,391 chars, 24 chunks)
+...
+[CHK] Chunks pre-calculados: 127 total ✓
+```
+
+<Tip>
+Pre-computation means zero chunking overhead during query processing. Chunks are retrieved via simple dictionary lookup.
+</Tip>
+
+## Chunk Ranking and Selection
+
+Once documents are selected by the router, the extractor ranks chunks within each document:
+
+```python siaa_proxy.py
+def extraer_fragmento(nombre_doc: str, pregunta: str) -> str:
+    with chunks_lock:
+        chunks = chunks_por_doc.get(nombre_doc, [])
+    
+    if not chunks:
+        return ""
+    
+    palabras = set(tokenizar(pregunta.lower()))
+    terminos_prio = obtener_terminos_prioritarios(nombre_doc)
+    
+    # Score every chunk
+    scored = []
+    for chunk in chunks:
+        pts = puntuar_chunk(chunk, palabras, pregunta, terminos_prio)
+        if pts > 0:
+            scored.append((pts, chunk["indice"], chunk))
+    
+    scored.sort(reverse=True)
+    
+    # Dynamic pruning: return 1-3 chunks based on score ratio
+    # (See document-routing.mdx for details)
+    ...
+```
+
+### Chunk Scoring Function
+
+```python siaa_proxy.py
+def puntuar_chunk(chunk: dict, palabras: set, pregunta_norm: str,
+                  terminos_prio: set, idf_local: dict = None) -> float:
+    """
+    Score chunk relevance using multiple signals.
+    
+    Scoring system:
+      +base×idf_local per keyword match (rare terms score higher)
+      +15 if full question text appears in chunk
+      +10 if chunk contains article with degree marker (art. 5°)
+      +5  if chunk contains article without degree (artículo 5)
+      +4  if chunk contains numbered list (procedures)
+      +0-20 proximity bonus (keywords clustered within 150 chars)
+    """
+    texto = chunk["texto"].lower()
+    puntos = 0.0
+    
+    # Keyword matching with TF-IDF
+    for w in palabras:
+        count = texto.count(w)
+        if count > 0:
+            tf = 1.0 + math.log(count)  # Log-normalized: 1→1.0, 2→1.69, 5→2.61
+            base = 3.0 if w in terminos_prio else 1.0
+            if idf_local and w in idf_local:
+                base *= idf_local[w]
+            puntos += tf * base
+    
+    # Full question match (strongest signal)
+    if pregunta_norm in texto:
+        puntos += 15.0
+    
+    # Article bonus
+    if PATRON_ARTICULO_GRADO.search(chunk["texto"]):
+        puntos += 10.0  # "artículo 5°", "art. 5º"
+    elif PATRON_ARTICULO_SIMPLE.search(chunk["texto"]):
+        puntos += 5.0   # "artículo 5"
+    
+    # Numbered list bonus (procedures)
+    if re.search(r'^\s*\d+[\.\)]\s+\S', chunk["texto"], re.MULTILINE):
+        puntos += 4.0
+    
+    # Proximity bonus: keywords clustered in 150-char window
+    if len(palabras) >= 2:
+        VENTANA = 150
+        PASO = 50
+        max_densidad = 0.0
+        for i in range(0, max(1, len(texto) - VENTANA), PASO):
+            v = texto[i:i+VENTANA]
+            matches = sum(1 for w in palabras if w in v)
+            if matches >= 2:
+                d = matches / len(palabras)
+                max_densidad = max(max_densidad, d)
+        
+        if   max_densidad >= 0.90: puntos += 20.0  # 90%+ keywords together
+        elif max_densidad >= 0.70: puntos += 12.0
+        elif max_densidad >= 0.50: puntos += 6.0
+        elif max_densidad >= 0.30: puntos += 2.0
+    
+    return puntos
+```
+
+<Card title="Local IDF Weighting" icon="scale-balanced">
+**Problem**: A term appearing in ALL chunks of a document provides no discriminative power.
+
+**Solution**: Calculate IDF within the document:
+```python
+idf_local[term] = log((total_chunks + 1) / (chunks_with_term + 1)) + 1.0
+```
+
+**Example**: In a 38-chunk document about SIERJU:
+- "sierju" appears in 32 chunks → `idf_local = log(39/33) ≈ 0.17` (low)
+- "sanción" appears in 3 chunks → `idf_local = log(39/4) ≈ 3.18` (high)
+
+A chunk containing "sanción" receives **18x higher weight** than one with just "sierju".
+</Card>
+
+## Dynamic Pruning: Francotirador vs Escopeta
+
+Depending on score confidence, return 1-3 chunks:
+
+```python siaa_proxy.py
+if len(scored) >= 2:
+    s1, s2 = scored[0][0], scored[1][0]
+    ratio = s1 / max(s2, 0.01)
+    
+    if ratio >= 3.0:
+        chunks_a_usar = 1   # High certainty → 1 chunk (~200 tokens)
+        modo = "FRANCOTIRADOR"
+    elif ratio >= 1.8:
+        chunks_a_usar = 2   # Medium certainty → 2 chunks (~400 tokens)
+        modo = "BINÓCULO"
+    else:
+        chunks_a_usar = MAX_CHUNKS_CONTEXTO  # Ambiguous → 3 chunks
+        modo = "ESCOPETA"
+    
+    print(f"  [PODA] {nombre_doc[:25]} ratio={ratio:.2f} → {chunks_a_usar}chunk [{modo}]", flush=True)
+```
+
+**Example log**:
+```
+[PODA] acuerdo_no._psaa16-1047 ratio=4.23 → 1chunk [FRANCOTIRADOR]
+[PODA] manual_procedimientos.m ratio=1.62 → 3chunk [ESCOPETA]
+```
+
+<Info>
+**Francotirador mode**: Top chunk scores 4.23x higher than second → very confident, send only best chunk  
+**Escopeta mode**: Scores close together (ratio < 1.8) → uncertain, send 3 chunks to cover possibilities
+</Info>
+
+### Exception: List Queries
+
+Queries asking for lists ("cuáles son", "enumera", "lista") always use minimum 2 chunks:
+
+```python siaa_proxy.py
+PATRONES_LISTADO = [
+    "cuáles son", "cuales son", "qué secciones", "que secciones",
+    "enumera", "lista los", "nombra", "menciona",
+    "cuántas secciones", "qué tipos", ...
+]
+
+def es_pregunta_listado(pregunta: str) -> bool:
+    p = pregunta.lower()
+    return any(pat in p for pat in PATRONES_LISTADO)
+
+# In extractor:
+if es_listado:
+    chunks_a_usar = max_chunks_efectivo if ratio < 1.8 else 2
+    modo = "LISTADO-BINÓCULO" if chunks_a_usar == 2 else "LISTADO-ESCOPETA"
+```
+
+**Reason**: List answers are distributed across chunks. Sending only 1 chunk returns incomplete lists.
+
+## Chunk Metadata in Context
+
+Selected chunks are sent to Ollama with metadata:
+
+```python siaa_proxy.py
+for pts, idx, chunk in scored[:chunks_a_usar * 2]:
+    if idx in indices_usados:
+        continue
+    
+    texto = chunk["texto"]
+    meta = f"[SEC: {chunk['seccion'][:60]} | CHUNK: {idx}]"
+    seleccionados.append(meta + "\n" + texto)
+    indices_usados.add(idx)
+
+nombre_display = os.path.splitext(doc["nombre_original"])[0].upper()
+etiqueta = f"[DOC: {nombre_display}]"
+separador = "\n" + "═" * 60 + "\n"
+
+return etiqueta + "\n" + "\n\n".join(seleccionados) + separador
+```
+
+**Example output sent to Ollama**:
+```
+[DOC: ACUERDO_NO._PSAA16-10476]
+[SEC: ARTÍCULO 19 — VIGENCIA Y DEROGATORIAS | CHUNK: 35]
+Artículo 19. El incumplimiento de lo dispuesto en el presente 
+acuerdo acarreará las sanciones disciplinarias establecidas en 
+el Código Disciplinario Único para funcionarios judiciales...
+
+[SEC: ARTÍCULO 20 — SANCIONES ESPECÍFICAS | CHUNK: 36]
+Los funcionarios que no reporten la información dentro del 
+plazo establecido (quinto día hábil) o la reporten de forma 
+incompleta o inexacta podrán ser objeto de investigación...
+════════════════════════════════════════════════════════════
+```
+
+<Success>
+The LLM receives:
+1. Document name for citation
+2. Section header for context
+3. Chunk index for traceability
+4. Clean text content
+
+This enables accurate, cited responses like: *"Según el ARTÍCULO 19 del Acuerdo PSAA16-10476..."*
+</Success>
+
+## Performance Impact
+
+### Memory Efficiency
+
+**Before chunking**: Send entire 45KB document → 11,250 tokens (exceeds context window)
+
+**After chunking**: Send 3 × 800 chars = 2,400 chars → ~600 tokens (fits with room for conversation history)
+
+### Query Speed
+
+| Approach | Tokens | Generation Time | Quality |
+|----------|--------|----------------|----------|
+| Full document | 11,250 | Timeout (>180s) | N/A |
+| Paragraph split | Variable (500-2000) | 25-60s | Poor (context fragmentation) |
+| **Chunking** | **600-1200** | **18-35s** | **High (coherent sections)** |
+
+### Chunk Statistics
+
+From `/siaa/status` endpoint:
+```json
+{
+  "total_documentos": 15,
+  "total_chunks": 127,
+  "chunk_size": 800,
+  "chunk_overlap": 300
+}
+```
+
+Average: **8.5 chunks per document**  
+Largest doc: **38 chunks** (acuerdo_psaa16-10476.md, 45KB)
+
+## Testing Chunk Extraction
+
+```bash
+curl "http://localhost:5000/siaa/fragmento?doc=acuerdo_no._psaa16-10476.md&q=sanciones+por+no+reportar"
+```
+
+**Response**:
+```json
+{
+  "documento": "acuerdo_no._psaa16-10476.md",
+  "pregunta": "sanciones por no reportar",
+  "fragmento": "[DOC: ACUERDO_NO._PSAA16-10476]\n[SEC: ARTÍCULO 19...",
+  "chars": 1847
+}
+```
+
+Shows exactly what context the LLM receives for the query.
+
+## Design Decisions
+
+### Why 800 characters?
+
+- **Token equivalent**: ~200 tokens (4:1 char:token ratio in Spanish)
+- **Semantic coherence**: 800 chars ≈ 3-5 paragraphs or 1 complete article
+- **Fits in context**: 3 chunks × 200 tokens = 600 tokens + system prompt + query ≈ 1,200 tokens (within 2048 limit)
+
+### Why 300 character overlap?
+
+- **Coverage**: 300/800 = 37.5% overlap ensures no sentence split
+- **Redundancy tolerance**: Overlap text helps LLM see continuity between sections
+- **Article preservation**: Legal articles average 500-1000 chars; 300-char overlap guarantees full article in at least one chunk
+
+### Why pre-compute chunks?
+
+Alternative: chunk on-demand during query
+
+<Warning>
+**On-demand chunking problems**:
+- 20-50ms overhead per query
+- Thread contention (15 threads reading same file)
+- No ability to optimize chunk boundaries
+</Warning>
+
+<Success>
+**Pre-computation benefits**:
+- Zero query-time overhead (dictionary lookup)
+- Chunks optimized at startup (can apply ML-based splitting in future)
+- Thread-safe read-only access
+</Success>
+
+<Card title="Next Steps" icon="arrow-right">
+- Learn how chunks are sent to [Ollama for generation](/architecture/ollama-integration)
+- Understand the [document routing](/architecture/document-routing) that precedes chunking
+- Return to [architecture overview](/architecture/overview)
+</Card>

@@ -1,0 +1,493 @@
+---
+title: Log Analysis
+description: Quality monitoring, log analysis, and performance tracking
+icon: file-lines
+---
+
+## Overview
+
+SIAA maintains a comprehensive quality log in JSONL (JSON Lines) format, recording every query with detailed metrics. This enables administrators to track system performance, identify issues, and analyze usage patterns.
+
+## Log File Format
+
+### File Location
+
+```bash
+LOG_ARCHIVO = "/opt/siaa/logs/calidad.jsonl"
+```
+
+The log file uses **JSONL** format: one complete JSON object per line, making it easy to parse with standard tools (grep, jq, Python, Excel).
+
+### Example Log Entry
+
+```json
+{
+  "ts": "2026-03-08T14:23:45",
+  "tipo": "DOC",
+  "alerta": "OK",
+  "pregunta": "¿Cuál es la periodicidad del reporte SIERJU?",
+  "respuesta": "El reporte SIERJU debe presentarse el quinto día hábil de cada mes, según lo establecido en el artículo 8 del Acuerdo PSAA16-10476...",
+  "docs": ["acuerdo_no._psaa16-10476.md"],
+  "ctx_chars": 2847,
+  "tiempo_s": 8.42
+}
+```
+
+## Log Entry Fields
+
+<ResponseField name="ts" type="string">
+  Timestamp in ISO 8601 format (`YYYY-MM-DDTHH:MM:SS`). Useful for time-series analysis.
+</ResponseField>
+
+<ResponseField name="tipo" type="string">
+  Query type:
+  - `"DOC"` — Document-based query
+  - `"CONV"` — Conversational query (greetings, general questions)
+  - `"CACHE_HIT"` — Response served from cache
+  - `"ERROR"` — Query failed with error
+</ResponseField>
+
+<ResponseField name="alerta" type="string">
+  Quality indicator:
+  - `"OK"` — Normal response
+  - `"POSIBLE_ALUCINACION"` — Model said "no encontré" despite having relevant documents
+  - `"SIN_CONTEXTO"` — No documents found (correct "no encontré" response)
+  - `"ERROR"` — Exception or system error
+</ResponseField>
+
+<ResponseField name="pregunta" type="string">
+  User's question, truncated to 200 characters for log size management.
+</ResponseField>
+
+<ResponseField name="respuesta" type="string">
+  First 300 characters of the AI response. Enough to verify quality without bloating logs.
+</ResponseField>
+
+<ResponseField name="docs" type="array">
+  List of document filenames used as context. Empty array `[]` for conversational queries or when no documents matched.
+</ResponseField>
+
+<ResponseField name="ctx_chars" type="integer">
+  Total characters of context sent to the AI model. Higher values indicate more comprehensive context but slower processing.
+</ResponseField>
+
+<ResponseField name="tiempo_s" type="number">
+  Query processing time in seconds (from request received to response complete).
+</ResponseField>
+
+## Alert Types
+
+### OK — Normal Operation
+
+The query was processed successfully with no issues detected:
+
+```json
+{
+  "tipo": "DOC",
+  "alerta": "OK",
+  "docs": ["acuerdo_psaa16-10476.md"],
+  "ctx_chars": 2400,
+  "respuesta": "El funcionario responsable de diligenciar el formulario SIERJU es..."
+}
+```
+
+### POSIBLE_ALUCINACION — Quality Alert
+
+**Detection criteria**: Model responded "no encontré esa información" but the system HAD found relevant documents (>100 chars of context).
+
+```json
+{
+  "tipo": "DOC",
+  "alerta": "POSIBLE_ALUCINACION",
+  "docs": ["acuerdo_psaa16-10476.md"],
+  "ctx_chars": 2100,
+  "respuesta": "No encontré esa información en los documentos disponibles."
+}
+```
+
+**Possible causes:**
+- Extractor selected wrong chunks
+- Context was irrelevant despite keyword matches
+- Model failed to interpret context correctly
+
+**Action**: Review the query with `/siaa/fragmento` endpoint to verify context quality.
+
+### SIN_CONTEXTO — No Documents Found
+
+No relevant documents were found for the query. The "no encontré" response is **correct**:
+
+```json
+{
+  "tipo": "DOC",
+  "alerta": "SIN_CONTEXTO",
+  "docs": [],
+  "ctx_chars": 0,
+  "respuesta": "No encontré esa información en los documentos disponibles."
+}
+```
+
+**Action**: Consider adding relevant documents to `/opt/siaa/fuentes/` if this query should be answerable.
+
+### ERROR — System Failure
+
+An exception occurred during processing:
+
+```json
+{
+  "tipo": "ERROR",
+  "alerta": "ERROR",
+  "respuesta": "ERROR: Connection timeout to Ollama",
+  "tiempo_s": 180.5
+}
+```
+
+**Action**: Check application logs and Ollama status.
+
+## Accessing Logs via Endpoint
+
+### Basic Usage
+
+Retrieve the most recent log entries:
+
+```bash
+curl http://localhost:5000/siaa/log
+```
+
+Default response shows last **50 entries** with a summary:
+
+```json
+{
+  "resumen": {
+    "total_consultas": 1247,
+    "errores": 3,
+    "posibles_alucinaciones": 12,
+    "cache_hits": 456,
+    "tiempo_promedio_s": 9.2
+  },
+  "entradas": [ /* 50 most recent log entries */ ],
+  "mostrando": 50
+}
+```
+
+## Query Parameters
+
+### n — Limit Results
+
+Retrieve a specific number of recent entries (max 500):
+
+```bash
+# Last 100 queries
+curl http://localhost:5000/siaa/log?n=100
+
+# Last 200 queries
+curl http://localhost:5000/siaa/log?n=200
+```
+
+### tipo — Filter by Query Type
+
+Show only specific query types:
+
+```bash
+# Only cache hits
+curl http://localhost:5000/siaa/log?tipo=CACHE_HIT
+
+# Only document queries
+curl http://localhost:5000/siaa/log?tipo=DOC
+
+# Only conversational queries
+curl http://localhost:5000/siaa/log?tipo=CONV
+
+# Only errors
+curl http://localhost:5000/siaa/log?tipo=ERROR
+```
+
+### alerta — Filter by Alert Type
+
+Identify problematic queries:
+
+```bash
+# Possible hallucinations
+curl http://localhost:5000/siaa/log?alerta=POSIBLE_ALUCINACION
+
+# Queries with no context
+curl http://localhost:5000/siaa/log?alerta=SIN_CONTEXTO
+
+# System errors
+curl http://localhost:5000/siaa/log?alerta=ERROR
+```
+
+### formato — Text Output
+
+Get human-readable text output for terminal viewing:
+
+```bash
+curl http://localhost:5000/siaa/log?formato=txt
+```
+
+Output:
+
+```
+=== Log SIAA — últimas 50 de 1247 consultas ===
+Errores: 3 | Posibles alucinaciones: 12 | Cache hits: 456 | T.prom: 9.2s
+
+[2026-03-08T14:23:45] DOC 8.4s
+  P: ¿Cuál es la periodicidad del reporte SIERJU?
+  R: El reporte SIERJU debe presentarse el quinto día hábil de cada mes, según lo esta...
+  Docs: ['acuerdo_no._psaa16-10476.md']
+
+[2026-03-08T14:22:10] ⚠ [POSIBLE_ALUCINACION] DOC 12.1s
+  P: ¿Qué sanciones hay por no reportar a tiempo?
+  R: No encontré esa información en los documentos disponibles.
+  Docs: ['acuerdo_no._psaa16-10476.md']
+```
+
+### Combined Filters
+
+Combine parameters for precise filtering:
+
+```bash
+# Last 20 possible hallucinations
+curl "http://localhost:5000/siaa/log?n=20&alerta=POSIBLE_ALUCINACION"
+
+# Last 100 document queries in text format
+curl "http://localhost:5000/siaa/log?n=100&tipo=DOC&formato=txt"
+```
+
+## Log Rotation
+
+### Automatic Rotation
+
+SIAA automatically rotates logs when they exceed `LOG_MAX_LINEAS` (default: 5,000 entries):
+
+```python
+LOG_MAX_LINEAS = 5000
+
+# When rotation triggers:
+# 1. Read existing log
+# 2. Keep only the most recent 4,000 entries
+# 3. Overwrite file with trimmed log
+# 4. Append new entry
+```
+
+Log file size typically stays under **2 MB** with default settings.
+
+### Manual Log Management
+
+Archive logs before they rotate:
+
+```bash
+# Archive current log
+sudo cp /opt/siaa/logs/calidad.jsonl \
+     /opt/siaa/logs/archive/calidad-$(date +%Y%m%d).jsonl
+
+# Clear log (start fresh)
+sudo truncate -s 0 /opt/siaa/logs/calidad.jsonl
+```
+
+### Preventing Data Loss
+
+For long-term analytics, export logs regularly:
+
+```bash
+#!/bin/bash
+# /usr/local/bin/siaa-log-export.sh
+TARGET="/opt/siaa/logs/archive/calidad-$(date +%Y-%m-%d).jsonl"
+cp /opt/siaa/logs/calidad.jsonl "$TARGET"
+gzip "$TARGET"
+```
+
+Schedule with cron:
+
+```bash
+# Daily at 2 AM
+0 2 * * * /usr/local/bin/siaa-log-export.sh
+```
+
+## Analyzing Quality Trends
+
+### Calculate Hit Rates
+
+Extract cache performance over time:
+
+```bash
+# Total queries by type
+cat /opt/siaa/logs/calidad.jsonl | \
+  jq -r '.tipo' | sort | uniq -c
+
+# Example output:
+# 456 CACHE_HIT
+# 723 DOC
+#  68 CONV
+```
+
+### Average Response Times
+
+```bash
+# Average time for document queries
+cat /opt/siaa/logs/calidad.jsonl | \
+  jq -r 'select(.tipo == "DOC") | .tiempo_s' | \
+  awk '{sum+=$1; n++} END {print sum/n}'
+
+# Example output: 9.2
+```
+
+### Identify Slow Queries
+
+```bash
+# Queries taking more than 30 seconds
+cat /opt/siaa/logs/calidad.jsonl | \
+  jq -r 'select(.tiempo_s > 30) | "\(.tiempo_s)s - \(.pregunta)"'
+```
+
+### Hallucination Rate
+
+```bash
+# Count total and hallucinations
+TOTAL=$(cat /opt/siaa/logs/calidad.jsonl | wc -l)
+ALUC=$(cat /opt/siaa/logs/calidad.jsonl | jq -r 'select(.alerta == "POSIBLE_ALUCINACION")' | wc -l)
+
+echo "Hallucination rate: $(awk "BEGIN {print ($ALUC/$TOTAL)*100}")%"
+```
+
+### Most Common Queries
+
+Identify frequently asked questions:
+
+```bash
+cat /opt/siaa/logs/calidad.jsonl | \
+  jq -r '.pregunta' | \
+  sort | uniq -c | sort -rn | head -20
+```
+
+### Document Usage Statistics
+
+```bash
+# Most frequently used documents
+cat /opt/siaa/logs/calidad.jsonl | \
+  jq -r '.docs[]' | \
+  sort | uniq -c | sort -rn
+
+# Example output:
+# 342 acuerdo_no._psaa16-10476.md
+#  89 circular_2019.md
+#  67 resolucion_001.md
+```
+
+## Performance Analysis
+
+### Response Time Distribution
+
+```bash
+# Queries by response time buckets
+cat /opt/siaa/logs/calidad.jsonl | jq -r '
+  if .tiempo_s < 5 then "<5s"
+  elif .tiempo_s < 10 then "5-10s"
+  elif .tiempo_s < 20 then "10-20s"
+  elif .tiempo_s < 30 then "20-30s"
+  else ">30s" end
+' | sort | uniq -c
+
+# Example output:
+#  234 &lt;5s
+#  456 5-10s
+#  298 10-20s
+#  123 20-30s
+#   12 &gt;30s
+```
+
+### Context Size vs Response Time
+
+Correlate context size with performance:
+
+```bash
+cat /opt/siaa/logs/calidad.jsonl | \
+  jq -r '"\(.ctx_chars)\t\(.tiempo_s)"' > /tmp/context_time.tsv
+
+# Plot with gnuplot or import to Excel
+```
+
+## Quality Monitoring Best Practices
+
+### Daily Review
+
+Check for issues each morning:
+
+```bash
+# Yesterday's problematic queries
+curl "http://localhost:5000/siaa/log?n=500&formato=txt" | \
+  grep -E "POSIBLE_ALUCINACION|ERROR"
+```
+
+### Weekly Reports
+
+Generate weekly performance summaries:
+
+```bash
+#!/bin/bash
+# weekly-report.sh
+echo "=== SIAA Weekly Report ==="
+echo ""
+echo "Summary:"
+curl -s http://localhost:5000/siaa/log?n=1000 | jq '.resumen'
+echo ""
+echo "Cache Performance:"
+curl -s http://localhost:5000/siaa/status | jq '.cache'
+```
+
+### Alert on Quality Degradation
+
+Monitor hallucination rate:
+
+```bash
+#!/bin/bash
+RATE=$(curl -s http://localhost:5000/siaa/log?n=100 | \
+  jq '[.entradas[] | select(.alerta == "POSIBLE_ALUCINACION")] | length')
+
+if [ "$RATE" -gt 10 ]; then
+  echo "ALERT: $RATE hallucinations in last 100 queries" | \
+    mail -s "SIAA Quality Alert" admin@example.com
+fi
+```
+
+## Troubleshooting with Logs
+
+### Debugging Failed Queries
+
+1. **Find the problematic query** in logs:
+
+```bash
+curl "http://localhost:5000/siaa/log?alerta=POSIBLE_ALUCINACION&n=10&formato=txt"
+```
+
+2. **Test the document router**:
+
+```bash
+curl "http://localhost:5000/siaa/enrutar?q=¿Qué%20sanciones%20hay?"
+```
+
+3. **Inspect extracted fragments**:
+
+```bash
+curl "http://localhost:5000/siaa/fragmento?doc=acuerdo_no._psaa16-10476.md&q=sanciones%20por%20incumplimiento"
+```
+
+### Identifying Timeout Patterns
+
+Find queries that consistently timeout:
+
+```bash
+cat /opt/siaa/logs/calidad.jsonl | \
+  jq -r 'select(.tiempo_s > 100) | .pregunta' | \
+  sort | uniq -c | sort -rn
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="sliders" href="/administration/configuration">
+    Tune chunk sizes and context limits based on log analysis
+  </Card>
+  <Card title="Cache Management" icon="database" href="/administration/cache-management">
+    Optimize cache settings using hit rate data
+  </Card>
+</CardGroup>

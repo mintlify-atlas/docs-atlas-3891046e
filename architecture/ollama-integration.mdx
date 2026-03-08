@@ -1,0 +1,575 @@
+---
+title: Ollama Integration
+description: LLM inference via Ollama API with streaming, warm-up, and error handling
+---
+
+# Ollama Integration
+
+SIAA uses **Ollama** as the local LLM inference engine, running **Qwen2.5:3b** for generating responses. The integration handles model configuration, streaming responses, health monitoring, and graceful error handling.
+
+## Model Configuration
+
+```python siaa_proxy.py
+OLLAMA_URL = "http://localhost:11434"
+MODEL = "qwen2.5:3b"
+
+# Connection timeouts
+TIMEOUT_CONEXION = 8      # Connection establishment timeout
+TIMEOUT_RESPUESTA = 180   # Total response timeout
+TIMEOUT_HEALTH = 5        # Health check timeout
+```
+
+### Why Qwen2.5:3b?
+
+| Criterion | Qwen2.5:3b | Alternatives |
+|-----------|------------|-------------|
+| **Model size** | ~4GB RAM | Llama3.1:8b = 8GB |
+| **Inference speed** | 15-20 tok/s | Llama3.1:8b = 8-12 tok/s |
+| **Spanish quality** | Excellent | Gemma2:7b = Good |
+| **Context window** | 4096 tokens | Phi3:3.8b = 2048 |
+| **Concurrent users** | 2 instances = 8GB total | 2×8GB = 16GB (exceeds budget) |
+
+<Info>
+With 16GB system RAM and 2 concurrent users (`MAX_OLLAMA_SIMULTANEOS=2`), Qwen2.5:3b leaves ~8GB for OS and document cache.
+</Info>
+
+## Main Inference Function
+
+```python siaa_proxy.py
+def llamar_ollama(mensajes: list, num_predict: int = 150, num_ctx: int = 2048) -> list:
+    """
+    Call Ollama API with streaming response.
+    
+    Args:
+        mensajes: List of {role, content} message dicts
+        num_predict: Maximum tokens to generate
+        num_ctx: Context window size (adaptive: 1024-3072)
+    
+    Returns:
+        List of SSE-formatted strings (OpenAI-compatible format)
+    """
+    # Acquire semaphore slot (max 2 concurrent requests)
+    adquirido = ollama_semaforo.acquire(timeout=30)
+    if not adquirido:
+        return ["COLA_LLENA"]  # Queue full, user must wait
+    
+    try:
+        resp = requests.post(
+            f"{OLLAMA_URL}/api/chat",
+            json={
+                "model": MODEL,
+                "messages": mensajes,
+                "stream": True,
+                "think": False,  # Disable chain-of-thought (not needed)
+                "options": {
+                    "temperature": 0.0,        # Deterministic (repeatability)
+                    "num_predict": num_predict,
+                    "num_ctx": num_ctx,
+                    "num_thread": 6,           # Physical cores only
+                    "num_batch": 512,          # Batch size for prefill
+                    "repeat_penalty": 1.1,     # Reduce repetition
+                    "stop": [
+                        "\n\n\n",              # Stop on triple newline
+                        "Espero que",          # Common filler phrase
+                        "Es importante destacar",
+                        "En conclusión,",
+                        "Sin embargo,",
+                        # ... more stop sequences
+                    ]
+                }
+            },
+            stream=True,
+            timeout=(TIMEOUT_CONEXION, TIMEOUT_RESPUESTA)
+        )
+        
+        if resp.status_code != 200:
+            return [f"ERROR_HTTP_{resp.status_code}"]
+        
+        # Parse streaming response and convert to OpenAI SSE format
+        chunks = []
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            try:
+                obj = json.loads(line.decode("utf-8"))
+                content_tok = obj.get("message", {}).get("content", "")
+                done = obj.get("done", False)
+                
+                if content_tok:
+                    # Escape for JSON and wrap in OpenAI SSE format
+                    safe = json.dumps(content_tok)[1:-1]
+                    chunks.append(
+                        f'data: {{"choices":[{{"delta":{{"content":"{safe}"}}}}]}}'
+                    )
+                
+                if done:
+                    chunks.append("data: [DONE]")
+            except Exception as e:
+                print(f"[PARSER] {e} | {str(line)[:80]}", flush=True)
+        
+        return chunks
+    
+    except requests.exceptions.ConnectTimeout:
+        with ollama_lock:
+            ollama_estado["disponible"] = False
+        return ["TIMEOUT_CONEXION"]
+    except requests.exceptions.ReadTimeout:
+        return ["TIMEOUT_RESPUESTA"]
+    except requests.exceptions.ConnectionError:
+        with ollama_lock:
+            ollama_estado["disponible"] = False
+        return ["OLLAMA_CAIDO"]
+    except Exception as e:
+        return [f"ERROR:{e}"]
+    finally:
+        ollama_semaforo.release()  # Always release semaphore
+```
+
+## Model Parameters Deep Dive
+
+### Temperature = 0.0
+
+```python
+"temperature": 0.0
+```
+
+**Effect**: Deterministic sampling (always pick highest-probability token)
+
+**Why**: Judicial documentation requires factual, consistent responses. Temperature > 0 introduces randomness:
+- Same question asked twice → different answers
+- Creative but potentially inaccurate phrasing
+- Harder to debug and validate
+
+<Warning>
+With `temperature=0.0`, "¿Cuándo debo reportar SIERJU?" always produces the same answer: "Debe reportar el quinto día hábil de cada mes."
+
+With `temperature=0.7`, responses vary: "El reporte se hace el 5to día hábil", "Mensualmente, en el quinto día...", etc.
+</Warning>
+
+### num_predict: Adaptive Token Limit
+
+```python siaa_proxy.py
+# In /siaa/chat endpoint
+_es_listado = not es_conv and es_pregunta_listado(ultima_pregunta)
+_num_predict = 300 if _es_listado else 150
+```
+
+**Base**: 150 tokens (~600 chars in Spanish) for normal queries  
+**Lists**: 300 tokens (~1200 chars) for enumeration queries
+
+**Example list query**: "¿Cuáles son las secciones del formulario SIERJU?"
+
+**Response** (requires ~250 tokens):
+```
+El formulario SIERJU contiene las siguientes secciones:
+1. Inventario de procesos (inicial y final)
+2. Ingresos por clase de proceso
+3. Egresos por tipo de terminación
+4. Carga laboral efectiva
+5. Estadísticas de decisiones
+6. Discrepancias y correcciones
+7. Observaciones generales
+
+Cada sección debe diligenciarse antes del quinto día hábil.
+```
+
+With `num_predict=150`, this would be truncated at item 4.
+
+### num_ctx: Dynamic Context Window
+
+```python siaa_proxy.py
+# Calculate context size dynamically
+_ctx_chars = len(contexto) + sum(len(m.get("content","")) for m in ollama_msgs)
+_ctx_tokens = _ctx_chars // 4  # Approximate: 1 token ≈ 4 chars
+
+if _ctx_tokens < 400:
+    _num_ctx = 1024   # Simple query or cache hit
+elif _ctx_tokens < 900:
+    _num_ctx = 2048   # Normal context
+else:
+    _num_ctx = 3072   # Large context (avoid 4096 - causes timeout)
+
+print(f"  [CTX] chars={_ctx_chars} tok≈{_ctx_tokens} → num_ctx={_num_ctx}", flush=True)
+```
+
+**Why adaptive?**
+
+1. **Small contexts** (greetings, cache hits): `num_ctx=1024` → faster inference
+2. **Normal queries** (2-3 chunks): `num_ctx=2048` → optimal speed/quality
+3. **Complex queries** (3 chunks from 2 docs): `num_ctx=3072` → prevents truncation
+
+**Example log**:
+```
+[CTX] chars=1847 tok≈461 → num_ctx=2048
+[CTX] chars=3421 tok≈855 → num_ctx=2048
+[CTX] chars=4892 tok≈1223 → num_ctx=3072
+```
+
+<Tip>
+**Why not always use 4096?**
+
+Larger context windows increase inference time exponentially:
+- `num_ctx=2048`: 18-25s response
+- `num_ctx=4096`: 40-70s response (often hits 180s timeout)
+
+Adaptive sizing gives best speed without sacrificing quality.
+</Tip>
+
+### num_thread: Physical Cores Only
+
+```python
+"num_thread": 6
+```
+
+**Hardware**: Ryzen 5 2600 (6 cores, 12 threads via SMT)
+
+**Why not 12 threads?**
+
+<Warning>
+LLM inference is **compute-bound**, not I/O-bound. Simultaneous Multithreading (SMT/Hyper-Threading) causes:
+- **Cache thrashing**: Two threads per core compete for L1/L2 cache
+- **Memory bandwidth saturation**: Matrix multiplications exceed RAM bandwidth
+- **Slower per-core speed**: 12 threads @ 80% = worse than 6 threads @ 100%
+
+Benchmark:
+- 6 threads: 18 tok/s average
+- 12 threads: 13 tok/s average (**28% slower**)
+</Warning>
+
+### num_batch: Prefill Optimization
+
+```python
+"num_batch": 512
+```
+
+**Prefill phase**: Processing the input prompt (context + question)  
+**Generation phase**: Producing output tokens one-by-one
+
+Larger batch size means:
+- Fewer CPU cycles to process input context
+- Lower **TTFT** (Time To First Token): 3-5s vs 8-12s with `num_batch=128`
+- No impact on generation speed (output is sequential)
+
+**Tradeoff**: Higher batch = more RAM usage (marginal for 3B model)
+
+### Stop Sequences
+
+```python
+"stop": [
+    "\n\n\n",                 # Triple newline (end of response)
+    "Espero que",             # Filler: "I hope this helps"
+    "Es importante destacar",  # Filler: "It's important to note"
+    "Cabe destacar que",
+    "En conclusión,",         # Often starts hallucinated summary
+    "Sin embargo,",           # Hedging language
+    "Por otro lado,",
+    "Cabe mencionar",
+]
+```
+
+**Purpose**: Stop generation when model starts adding fluff or generic conclusions.
+
+**Example without stop sequences**:
+```
+El SIERJU debe reportarse el quinto día hábil de cada mes.
+
+Es importante destacar que el cumplimiento de esta norma es 
+obligatorio para todos los despachos judiciales. Sin embargo, 
+en casos excepcionales se pueden presentar discrepancias que 
+deben corregirse dentro de los 5 días hábiles siguientes...
+[continues with generic legal language for 200+ tokens]
+```
+
+**Example with stop sequences**:
+```
+El SIERJU debe reportarse el quinto día hábil de cada mes.
+```
+
+<Success>
+Stop sequences reduce:
+- Response time (fewer tokens to generate)
+- Hallucination risk (less generic content)
+- User confusion (concise, direct answers)
+</Success>
+
+## System Prompts
+
+### Conversational Prompt
+
+```python siaa_proxy.py
+SYSTEM_CONVERSACIONAL = """Eres SIAA (Sistema Inteligente de Apoyo Administrativo), 
+el asistente oficial de la Seccional Bucaramanga de la Rama Judicial de Colombia.
+
+SIAA significa exactamente: "Sistema Inteligente de Apoyo Administrativo". 
+No significa nada más.
+
+Responde con cordialidad en español formal.
+Para saludos y preguntas generales sobre ti mismo, responde directamente.
+Recuerda que puedes ayudar con consultas sobre procesos judiciales, 
+administrativos y normativos."""
+```
+
+Used for greetings and general questions ("¿Qué es SIAA?", "Hola", "Gracias").
+
+### Documentary Prompt
+
+```python siaa_proxy.py
+SYSTEM_DOCUMENTAL = """Eres SIAA, asistente judicial de la Seccional Bucaramanga.
+
+TAREA: Responder usando ÚNICAMENTE el contenido de los bloques [DOC:...] que recibirás.
+
+PROCESO OBLIGATORIO — sigue estos pasos en orden:
+1. Lee cada bloque [DOC:...] completo.
+2. Identifica qué partes del texto se relacionan con la pregunta, aunque sea parcialmente.
+3. Construye la respuesta con esos fragmentos relevantes.
+4. Si encontraste información aunque sea parcial → responde con ella.
+5. Solo si el contexto es completamente ajeno al tema → responde: 
+   "No encontré esa información en los documentos disponibles."
+
+REGLAS ADICIONALES:
+- Cita literalmente artículos, campos, fechas, roles y valores numéricos.
+- Si el contexto habla del tema en términos generales, explica eso al usuario.
+- Si la pregunta pregunta por un campo específico de un formulario y el contexto 
+  lo lista, nómbralo.
+- Nunca inventes información que no esté en el contexto.
+- Español formal institucional. Sin preámbulos. Máximo 10 líneas."""
+```
+
+<Card title="Why Two Prompts?" icon="split">
+**Conversational mode**: Model can use general knowledge for greetings
+
+**Documentary mode**: Model MUST ground responses in provided context
+
+**Detection logic**:
+```python
+def es_conversacion_general(texto: str) -> bool:
+    t = texto.lower().strip()
+    
+    # Technical terms always trigger documentary mode
+    if any(term in t for term in TERMINOS_SIEMPRE_DOCUMENTAL):
+        return False
+    
+    # Ultra-short queries are greetings
+    if len(t) < 8:
+        return True
+    
+    # Check for greeting patterns
+    return any(p in t for p in PATRONES_CONVERSACION)
+```
+</Card>
+
+## Streaming Response Handling
+
+Ollama streams responses in **NDJSON** format (newline-delimited JSON). SIAA converts this to **OpenAI SSE format** for frontend compatibility:
+
+### Ollama Format
+
+```json
+{"model":"qwen2.5:3b","message":{"role":"assistant","content":"El"},"done":false}
+{"model":"qwen2.5:3b","message":{"role":"assistant","content":" SIER"},"done":false}
+{"model":"qwen2.5:3b","message":{"role":"assistant","content":"JU"},"done":false}
+...
+{"model":"qwen2.5:3b","done":true,"total_duration":18234782901}
+```
+
+### OpenAI SSE Format (Output)
+
+```json
+data: {"choices":[{"delta":{"content":"El"}}]}
+
+data: {"choices":[{"delta":{"content":" SIER"}}]}
+
+data: {"choices":[{"delta":{"content":"JU"}}]}
+
+...
+
+data: [DONE]
+```
+
+**Conversion logic**:
+```python siaa_proxy.py
+for line in resp.iter_lines():
+    obj = json.loads(line.decode("utf-8"))
+    content_tok = obj.get("message", {}).get("content", "")
+    done = obj.get("done", False)
+    
+    if content_tok:
+        safe = json.dumps(content_tok)[1:-1]  # Escape quotes, newlines
+        chunks.append(
+            f'data: {{"choices":[{{"delta":{{"content":"{safe}"}}}}]}}'
+        )
+    
+    if done:
+        chunks.append("data: [DONE]")
+```
+
+<Info>
+**Why convert formats?**
+
+The frontend uses OpenAI's JavaScript SDK, which expects SSE format. Converting server-side means zero frontend changes when switching LLM providers.
+</Info>
+
+## Warm-up Process
+
+On first successful Ollama connection, load the model into RAM:
+
+```python siaa_proxy.py
+def verificar_ollama() -> bool:
+    try:
+        r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=TIMEOUT_HEALTH)
+        ok = (r.status_code == 200)
+    except Exception:
+        ok = False
+    
+    with ollama_lock:
+        ollama_estado["disponible"] = ok
+        ollama_estado["ultimo_check"] = time.time()
+        ollama_estado["fallos"] = 0 if ok else ollama_estado["fallos"] + 1
+        warmup_pendiente = ok and ollama_estado["warmup_done"] is None
+    
+    if warmup_pendiente:
+        try:
+            print(f"  [Ollama] Precargando {MODEL} en RAM...", flush=True)
+            requests.post(
+                f"{OLLAMA_URL}/api/chat",
+                json={
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": "ok"}],
+                    "stream": False,
+                    "options": {"num_predict": 1, "num_ctx": 64}
+                },
+                timeout=(10, 35)
+            )
+            with ollama_lock:
+                ollama_estado["warmup_done"] = True
+            print(f"  [Ollama] {MODEL} listo en RAM ✓", flush=True)
+        except Exception as e:
+            print(f"  [Ollama] Warm-up falló: {e}", flush=True)
+            with ollama_lock:
+                ollama_estado["warmup_done"] = False
+    
+    return ok
+```
+
+**Warm-up query**: Single-token prediction with minimal context
+
+**Why?**
+- **Cold start**: First query after Ollama restart takes 30-45s (loading model from disk)
+- **Warm start**: Subsequent queries take 18-25s (model in RAM)
+- **Warm-up**: Trigger cold start during server initialization, not on user's first query
+
+**Startup log**:
+```
+[Ollama] Precargando qwen2.5:3b en RAM...
+[Ollama] qwen2.5:3b listo en RAM ✓
+Ollama: OK ✓
+```
+
+## Error Handling
+
+Graceful degradation for common failures:
+
+```python siaa_proxy.py
+ERRORES = {
+    "COLA_LLENA":        "⏳ Sistema ocupado. Intente en 30 segundos.",
+    "TIMEOUT_CONEXION":  "⚠ IA no responde. Intente de nuevo.",
+    "TIMEOUT_RESPUESTA": "⏱ Consulta tomó demasiado tiempo.",
+    "OLLAMA_CAIDO":      "⚠ Servidor IA reiniciándose. Espere 1 minuto.",
+}
+
+if result[0] in ERRORES:
+    yield f'data: {{"choices":[{{"delta":{{"content":"{ERRORES[result[0]]}"}}}}]}}\n\n'
+    return
+```
+
+### Error Scenarios
+
+| Error | Cause | User Message | Recovery |
+|-------|-------|--------------|----------|
+| `COLA_LLENA` | 3rd request while 2 active | "Sistema ocupado. Intente en 30s" | Auto-retry after timeout |
+| `TIMEOUT_CONEXION` | Ollama not responding | "IA no responde" | Health monitor marks unavailable |
+| `TIMEOUT_RESPUESTA` | Query >180s | "Consulta tomó demasiado tiempo" | Reduce context size |
+| `OLLAMA_CAIDO` | Connection refused | "Servidor IA reiniciándose" | Daemon restart in progress |
+
+## Health Monitoring
+
+Background thread checks Ollama every 15 seconds:
+
+```python siaa_proxy.py
+def _monitor_loop():
+    while True:
+        verificar_ollama()
+        time.sleep(15)
+
+threading.Thread(target=_monitor_loop, daemon=True).start()
+```
+
+**Health check endpoint**: `GET /api/tags`
+
+**State tracking**:
+```python
+ollama_estado = {
+    "disponible": False,
+    "ultimo_check": 0,
+    "fallos": 0,
+    "warmup_done": None
+}
+```
+
+**Benefits**:
+- Proactive detection of Ollama crashes
+- Automatic warm-up after restart
+- User-facing error messages before timeout
+
+## Performance Tuning Results
+
+| Metric | Before Tuning | After Tuning | Change |
+|--------|---------------|--------------|--------|
+| **TTFT** | 8-12s | 3-5s | **-58%** |
+| **Tokens/sec** | 13 | 18 | **+38%** |
+| **Avg response time** | 32s | 22s | **-31%** |
+| **Timeout rate** | 12% | 2% | **-83%** |
+
+**Key optimizations**:
+1. `num_thread=6` instead of 12
+2. `num_batch=512` instead of 128
+3. Adaptive `num_ctx` instead of fixed 4096
+4. Stop sequences to prevent overgeneration
+
+## Testing Ollama Integration
+
+### Check Health
+
+```bash
+curl http://localhost:5000/siaa/status
+```
+
+**Response**:
+```json
+{
+  "version": "2.1.25",
+  "estado": "ok",
+  "ollama": true,
+  "ollama_fallos": 0,
+  "modelo": "qwen2.5:3b",
+  "warmup_completado": true,
+  "usuarios_activos": 0,
+  "total_atendidos": 1247
+}
+```
+
+### Direct Ollama Test
+
+```bash
+curl http://localhost:11434/api/chat -d '{
+  "model": "qwen2.5:3b",
+  "messages": [{"role": "user", "content": "Hola"}],
+  "stream": false
+}'
+```
+
+<Card title="Next Steps" icon="arrow-right">
+- Review the complete [system architecture](/architecture/overview)
+- Understand [document routing](/architecture/document-routing)
+- Learn about [chunking strategies](/architecture/chunking)
+</Card>

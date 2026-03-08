@@ -1,80 +1,492 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Get SIAA up and running in minutes"
 ---
 
-## Get started in three steps
+## Overview
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+This guide will help you start SIAA, convert your first documents, and make your first intelligent query to the system.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  Make sure you've completed the [installation guide](/installation) before proceeding.
 </Note>
+
+## Starting SIAA
+
+<Steps>
+  <Step title="Start Ollama Service">
+    Start the Ollama service that powers the AI model:
+
+    ```bash
+    ollama serve
+    ```
+
+    <Note>
+      This command runs in the foreground. Open a new terminal for the next steps, or run it in the background with `nohup ollama serve > /tmp/ollama.log 2>&1 &`
+    </Note>
+
+    Verify the model is loaded:
+
+    ```bash
+    curl http://localhost:11434/api/tags
+    ```
+
+    You should see `qwen2.5:3b` in the response.
+  </Step>
+
+  <Step title="Start the Flask Proxy Server">
+    Navigate to your SIAA directory and start the proxy server:
+
+    ```bash
+    cd ~/siaa
+    python3 siaa_proxy.py
+    ```
+
+    The server will start on port 5000 and you'll see output like:
+
+    ```
+    ================================================================
+      SIAA v2.1.25 — Sistema Inteligente de Apoyo Administrativo
+      Seccional Bucaramanga — Rama Judicial
+    ================================================================
+      Ollama URL    : http://localhost:11434
+      Modelo        : qwen2.5:3b
+      Puerto        : 5000
+      Hilos         : 16
+    ================================================================
+    ```
+
+    <Warning>
+      The proxy server must remain running. Consider using `systemd`, `screen`, or `tmux` for production deployments.
+    </Warning>
+  </Step>
+
+  <Step title="Verify System Status">
+    Check the system status:
+
+    ```bash
+    curl http://localhost:5000/siaa/status
+    ```
+
+    Expected response:
+
+    ```json
+    {
+      "status": "ok",
+      "version": "2.1.25",
+      "model": "qwen2.5:3b",
+      "ollama_disponible": true,
+      "documentos_cargados": 0,
+      "cache": {
+        "entradas": 0,
+        "max": 200,
+        "hits": 0,
+        "misses": 0,
+        "hit_rate": "0.0%",
+        "ttl_seg": 3600
+      }
+    }
+    ```
+
+    <Note>
+      Initially, `documentos_cargados` will be 0. You'll add documents in the next step.
+    </Note>
+  </Step>
+</Steps>
+
+## Converting Documents
+
+<Steps>
+  <Step title="Prepare Your Documents">
+    Place your documents in the appropriate directories:
+
+    **For institutional documents** (Word/Excel pairs):
+    ```bash
+    mkdir -p /opt/siaa/instructivos/"Juzgado Civil Municipal"
+    # Copy .docx and .xlsx files to this folder
+    ```
+
+    **For PDF documents**:
+    ```bash
+    cp your-document.pdf /opt/siaa/pdfs_origen/
+    ```
+
+    <Note>
+      Each subfolder in `/opt/siaa/instructivos` should contain one Word document (.doc or .docx) and one Excel file (.xls or .xlsx).
+    </Note>
+  </Step>
+
+  <Step title="Convert Institutional Documents">
+    Run the main converter for Word/Excel documents:
+
+    ```bash
+    cd ~/siaa
+    python3 convertidor.py
+    ```
+
+    You'll see output showing the conversion progress:
+
+    ```
+    ==========================================================
+      SIAA — Convertidor Completo
+      Origen : /opt/siaa/instructivos
+      MD     : /opt/siaa/fuentes
+      SQLite : /opt/siaa/institucional.db
+    ==========================================================
+
+      Procesando 1 carpeta(s):
+
+      → Juzgado Civil Municipal (.docx) ... ✅ (1.2s)
+
+    === Markdown generados ===
+      juzgado_civil_municipal.md
+
+    === Tablas SQLite ===
+      juzgado_civil_municipal: 45 filas
+
+    === Resumen ===
+      Carpetas procesadas : 1
+      Word/PDF → Markdown : 1 ✅  0 ❌
+      Excel   → SQLite    : 1 ✅  0 ❌
+      Carpetas con errores: 0
+    ```
+
+    <Note>
+      The converter automatically reloads the SIAA document index after successful conversion.
+    </Note>
+  </Step>
+
+  <Step title="Convert PDF Documents">
+    For PDF documents, use the specialized PDF converter:
+
+    ```bash
+    python3 convertidor_pdf.py
+    ```
+
+    The converter automatically detects if a PDF has native text or requires OCR:
+
+    ```
+    =======================================================
+      SIAA Convertidor PDF v2.0
+      PDFs: 3 | Modo: Auto
+      Salida: /opt/siaa/fuentes/normativa
+    =======================================================
+
+      📂 acuerdo_psaa16-10476.pdf
+        ✅ acuerdo_psaa16-10476.md → 24,679 chars [pymupdf4llm]
+
+      📂 resolucion_escaneada.pdf
+        ⚠ pymupdf extrajo 45 chars → OCR...
+        📷 Convirtiendo a imágenes (DPI=300)...
+        📄 5 página(s)
+        🔍 OCR página 5/5...
+        ✅ resolucion_escaneada.md → 8,234 chars [OCR Tesseract]
+    ```
+
+    <Note>
+      If pymupdf extracts less than 200 characters, the system automatically falls back to OCR using Tesseract.
+    </Note>
+  </Step>
+
+  <Step title="Reload the Document Index">
+    After adding documents, reload the SIAA index:
+
+    ```bash
+    curl http://localhost:5000/siaa/recargar
+    ```
+
+    Response:
+
+    ```json
+    {
+      "status": "ok",
+      "total_docs": 15,
+      "colecciones": ["general", "normativa"]
+    }
+    ```
+
+    Verify documents are loaded:
+
+    ```bash
+    curl http://localhost:5000/siaa/status
+    ```
+  </Step>
+</Steps>
+
+## Using the Web Interface
+
+<Steps>
+  <Step title="Open the Web Interface">
+    Open your browser and navigate to:
+
+    ```
+    http://localhost:5000
+    ```
+
+    Or if accessing from another machine:
+
+    ```
+    http://YOUR_SERVER_IP:5000
+    ```
+
+    <Note>
+      The web interface is located at `Web/index.html` and is served automatically by the Flask proxy.
+    </Note>
+  </Step>
+
+  <Step title="Make Your First Query">
+    Try asking a question about your documents:
+
+    **Example queries:**
+    - "¿Qué es el SIERJU?"
+    - "¿Cuándo debo reportar la información?"
+    - "¿Quién es responsable de cargar los datos?"
+    - "¿Qué sanciones hay por incumplimiento?"
+
+    The system will:
+    1. Classify your question (conversational or document-based)
+    2. Find relevant documents using the TF-IDF index
+    3. Extract relevant chunks with overlap
+    4. Generate a response using the Qwen2.5:3b model
+    5. Provide source citations
+  </Step>
+</Steps>
+
+## Making API Queries
+
+You can also query SIAA via the REST API:
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST http://localhost:5000/siaa/consulta \
+  -H "Content-Type: application/json" \
+  -d '{"pregunta": "¿Qué es el SIERJU?"}'
+```
+
+```python Python
+import requests
+
+response = requests.post(
+    "http://localhost:5000/siaa/consulta",
+    json={"pregunta": "¿Qué es el SIERJU?"}
+)
+
+for line in response.iter_lines():
+    if line:
+        print(line.decode('utf-8'))
+```
+
+```javascript JavaScript
+fetch('http://localhost:5000/siaa/consulta', {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({pregunta: '¿Qué es el SIERJU?'})
+})
+.then(response => response.body.getReader())
+.then(reader => {
+  function read() {
+    reader.read().then(({done, value}) => {
+      if (done) return;
+      console.log(new TextDecoder().decode(value));
+      read();
+    });
+  }
+  read();
+});
+```
+
+</CodeGroup>
+
+<Note>
+  The API streams responses using Server-Sent Events (SSE) for real-time output. Each chunk is prefixed with `data: `.
+</Note>
+
+## Monitoring System Health
+
+### Check System Status
+
+```bash
+curl http://localhost:5000/siaa/status
+```
+
+Key metrics:
+- `documentos_cargados`: Number of indexed documents
+- `cache.hit_rate`: Percentage of queries served from cache
+- `ollama_disponible`: Ollama service availability
+
+### View Quality Logs
+
+SIAA logs all queries to `/opt/siaa/logs/calidad.jsonl`:
+
+```bash
+# View last 10 queries
+tail -10 /opt/siaa/logs/calidad.jsonl | jq
+
+# Get cache hit queries
+grep 'CACHE_HIT' /opt/siaa/logs/calidad.jsonl
+
+# Find slow queries (>30 seconds)
+jq 'select(.tiempo_s > 30)' /opt/siaa/logs/calidad.jsonl
+```
+
+<Note>
+  The log file is in JSONL format (one JSON object per line) for easy analysis with `jq`, `grep`, or Python.
+</Note>
+
+### Access Logs via API
+
+```bash
+# Last 50 entries (default)
+curl http://localhost:5000/siaa/log
+
+# Last 100 entries
+curl http://localhost:5000/siaa/log?n=100
+
+# Only errors
+curl http://localhost:5000/siaa/log?tipo=ERROR
+```
+
+## Performance Tips
+
+<CardGroup cols={2}>
+  <Card title="Cache Efficiency" icon="bolt">
+    The LRU cache stores up to 200 queries for 1 hour. Repeated queries return in ~5ms vs 44s.
+    
+    Monitor cache hit rate: `curl http://localhost:5000/siaa/status | jq .cache.hit_rate`
+  </Card>
+
+  <Card title="Document Chunking" icon="scissors">
+    Documents are split into 800-character chunks with 300-character overlap, ensuring context preservation.
+    
+    Configured in `siaa_proxy.py:294-296`
+  </Card>
+
+  <Card title="Concurrent Queries" icon="users">
+    The system supports up to 2 concurrent Ollama queries with 16 server threads.
+    
+    Configured in `siaa_proxy.py:277-278`
+  </Card>
+
+  <Card title="Model Warm-up" icon="fire">
+    The Qwen2.5:3b model is preloaded into RAM on startup for faster first query.
+    
+    See warm-up logic in `siaa_proxy.py:509-529`
+  </Card>
+</CardGroup>
+
+## Advanced Configuration
+
+### Convert Specific Folders Only
+
+```bash
+python3 convertidor.py --only-folder "Juzgado Civil Municipal"
+```
+
+### Force OCR for All PDFs
+
+```bash
+python3 convertidor_pdf.py --forzar-ocr
+```
+
+### Reconvert Only Empty/Failed Documents
+
+```bash
+python3 convertidor_pdf.py --reconvertir
+```
+
+### Custom Paths
+
+```bash
+python3 convertidor.py \
+  --origen /custom/input \
+  --dest-md /custom/output \
+  --db /custom/database.db \
+  --log /custom/logs/errors.log
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="No documents loaded">
+    Check if documents were converted correctly:
+
+    ```bash
+    ls -la /opt/siaa/fuentes/
+    ```
+
+    Reload the index:
+
+    ```bash
+    curl http://localhost:5000/siaa/recargar
+    ```
+  </Accordion>
+
+  <Accordion title="Slow query responses">
+    Check Ollama status:
+
+    ```bash
+    curl http://localhost:11434/api/tags
+    ```
+
+    Verify the model is loaded:
+
+    ```bash
+    ollama list | grep qwen2.5:3b
+    ```
+
+    Monitor system resources:
+
+    ```bash
+    htop
+    ```
+
+    Qwen2.5:3b requires approximately 2-4GB RAM.
+  </Accordion>
+
+  <Accordion title="Document conversion fails">
+    Check conversion logs:
+
+    ```bash
+    cat /opt/siaa/logs/conversion_errores.log
+    ```
+
+    Common issues:
+    - LibreOffice not installed: `which libreoffice`
+    - Permission errors: `sudo chown -R $USER /opt/siaa`
+    - Corrupted documents: Try manual conversion
+  </Accordion>
+
+  <Accordion title="Cache not working">
+    Verify cache configuration in `siaa_proxy.py:61-63`:
+
+    ```python
+    CACHE_MAX_ENTRADAS = 200
+    CACHE_TTL_SEGUNDOS = 3600
+    CACHE_SOLO_DOC     = True
+    ```
+
+    Check cache stats:
+
+    ```bash
+    curl http://localhost:5000/siaa/status | jq .cache
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="API Reference" icon="code" href="/api/chat">
+    Explore all available API endpoints
+  </Card>
+  <Card title="Document Management" icon="folder" href="/features/document-processing">
+    Learn about document organization and indexing
+  </Card>
+  <Card title="System Architecture" icon="diagram-project" href="/architecture/overview">
+    Understand how SIAA works internally
+  </Card>
+  <Card title="Administration" icon="server" href="/administration/configuration">
+    Configure and monitor your SIAA instance
+  </Card>
+</CardGroup>

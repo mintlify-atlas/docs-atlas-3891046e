@@ -1,0 +1,256 @@
+---
+title: 'GET /siaa/status'
+description: 'Get system health and operational metrics'
+---
+
+## Overview
+
+The `/siaa/status` endpoint provides comprehensive information about the SIAA system's health, including Ollama availability, cache statistics, active users, document index status, and configuration parameters.
+
+## Endpoint
+
+```
+GET /siaa/status
+```
+
+## Request
+
+No parameters required.
+
+## Response
+
+<ResponseField name="version" type="string">
+  Current SIAA proxy version (e.g., `"2.1.25"`)
+</ResponseField>
+
+<ResponseField name="estado" type="string">
+  Overall system state: `"ok"` or `"error"`
+</ResponseField>
+
+<ResponseField name="cache" type="object">
+  Cache statistics object:
+  
+  <ResponseField name="entradas" type="number">
+    Current number of cached responses
+  </ResponseField>
+  
+  <ResponseField name="max" type="number">
+    Maximum cache capacity (200)
+  </ResponseField>
+  
+  <ResponseField name="hits" type="number">
+    Total cache hits since startup
+  </ResponseField>
+  
+  <ResponseField name="misses" type="number">
+    Total cache misses since startup
+  </ResponseField>
+  
+  <ResponseField name="hit_rate" type="string">
+    Cache hit rate percentage (e.g., `"38.5%"`)
+  </ResponseField>
+  
+  <ResponseField name="ttl_seg" type="number">
+    Time-to-live for cache entries in seconds (3600)
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="ollama" type="boolean">
+  Ollama service availability: `true` if available, `false` if down
+</ResponseField>
+
+<ResponseField name="ollama_fallos" type="number">
+  Number of consecutive Ollama health check failures
+</ResponseField>
+
+<ResponseField name="modelo" type="string">
+  Active LLM model name (e.g., `"qwen2.5:3b"`)
+</ResponseField>
+
+<ResponseField name="warmup_completado" type="boolean | null">
+  Indicates if the model has been preloaded into RAM:
+  - `true`: Model loaded successfully
+  - `false`: Warmup failed
+  - `null`: Warmup not yet attempted
+</ResponseField>
+
+<ResponseField name="usuarios_activos" type="number">
+  Number of currently active concurrent requests
+</ResponseField>
+
+<ResponseField name="total_atendidos" type="number">
+  Total requests served since startup
+</ResponseField>
+
+<ResponseField name="total_documentos" type="number">
+  Total number of documents loaded in the system
+</ResponseField>
+
+<ResponseField name="total_chunks" type="number">
+  Total number of pre-computed document chunks across all documents
+</ResponseField>
+
+<ResponseField name="indice_terminos" type="number">
+  Number of unique terms in the density index
+</ResponseField>
+
+<ResponseField name="chunk_size" type="number">
+  Maximum chunk size in characters (800)
+</ResponseField>
+
+<ResponseField name="chunk_overlap" type="number">
+  Overlap between consecutive chunks in characters (300)
+</ResponseField>
+
+<ResponseField name="colecciones" type="object">
+  Object mapping collection names to their document lists and totals:
+  
+  <ResponseField name="[collection_name]" type="object">
+    <ResponseField name="docs" type="array">
+      Array of document filenames in this collection
+    </ResponseField>
+    <ResponseField name="total" type="number">
+      Total documents in this collection
+    </ResponseField>
+  </ResponseField>
+</ResponseField>
+
+## Example Response
+
+```json
+{
+  "version": "2.1.25",
+  "estado": "ok",
+  "cache": {
+    "entradas": 87,
+    "max": 200,
+    "hits": 245,
+    "misses": 392,
+    "hit_rate": "38.5%",
+    "ttl_seg": 3600
+  },
+  "ollama": true,
+  "ollama_fallos": 0,
+  "modelo": "qwen2.5:3b",
+  "warmup_completado": true,
+  "usuarios_activos": 2,
+  "total_atendidos": 1847,
+  "total_documentos": 18,
+  "total_chunks": 486,
+  "indice_terminos": 12847,
+  "chunk_size": 800,
+  "chunk_overlap": 300,
+  "colecciones": {
+    "general": {
+      "docs": [
+        "acuerdo_no._psaa16-10476.md",
+        "acuerdo_pcsja19-11207.md",
+        "circular_cendoj_10-2022.md"
+      ],
+      "total": 3
+    },
+    "juzgados": {
+      "docs": [
+        "juzgado_civil_municipal.md",
+        "juzgado_penal_circuito.md",
+        "juzgado_familia.md"
+      ],
+      "total": 3
+    }
+  }
+}
+```
+
+## Usage Examples
+
+### Check System Health
+
+```bash
+curl http://localhost:5000/siaa/status
+```
+
+### Monitor Cache Performance
+
+```bash
+curl http://localhost:5000/siaa/status | jq '.cache'
+```
+
+**Example output**:
+```json
+{
+  "entradas": 87,
+  "max": 200,
+  "hits": 245,
+  "misses": 392,
+  "hit_rate": "38.5%",
+  "ttl_seg": 3600
+}
+```
+
+### Check Ollama Status
+
+```bash
+curl http://localhost:5000/siaa/status | jq '{ollama, modelo, warmup_completado, ollama_fallos}'
+```
+
+**Example output**:
+```json
+{
+  "ollama": true,
+  "modelo": "qwen2.5:3b",
+  "warmup_completado": true,
+  "ollama_fallos": 0
+}
+```
+
+### List All Collections and Documents
+
+```bash
+curl http://localhost:5000/siaa/status | jq '.colecciones'
+```
+
+### Monitor Active Load
+
+```bash
+watch -n 2 'curl -s http://localhost:5000/siaa/status | jq "{usuarios_activos, total_atendidos}"'
+```
+
+This command refreshes every 2 seconds to show current load.
+
+## Status Interpretation
+
+### Healthy System
+
+- `estado`: `"ok"`
+- `ollama`: `true`
+- `ollama_fallos`: `0`
+- `warmup_completado`: `true`
+- `cache.hit_rate`: Above 20% indicates effective caching
+
+### Warning Signs
+
+- `ollama_fallos` > 0: Ollama service is experiencing connectivity issues
+- `warmup_completado`: `false`: Model failed to load into RAM, first queries will be slow
+- `usuarios_activos` persistently high: System may be under heavy load
+- `cache.hit_rate` < 10%: Cache is not effective (queries are too diverse)
+
+### Critical Issues
+
+- `estado`: `"error"`: Overall system failure
+- `ollama`: `false`: LLM service unavailable, chat endpoint will return errors
+- `total_documentos`: `0`: No documents loaded, document queries will fail
+
+## Monitoring and Alerts
+
+The status endpoint is designed for:
+
+- **Health checks**: Load balancer probes should check `estado === "ok"`
+- **Metrics collection**: Export to Prometheus, Grafana, or similar
+- **Capacity planning**: Track `total_atendidos` and `usuarios_activos` trends
+- **Cache optimization**: Monitor `hit_rate` to evaluate query patterns
+
+## Related Endpoints
+
+- [GET /siaa/cache](/api/cache) - Detailed cache statistics and cache clearing
+- [GET /siaa/log](/api/log) - Quality monitoring and query logs
+- [GET /siaa/recargar](/api/reload) - Reload document index

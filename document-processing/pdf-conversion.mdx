@@ -1,0 +1,376 @@
+---
+title: PDF Conversion
+description: Convert PDF documents to Markdown with automatic OCR fallback for scanned documents
+---
+
+# PDF Conversion
+
+SIAA provides intelligent PDF conversion with automatic detection of scanned documents and OCR fallback.
+
+## Two-Mode Architecture
+
+<CardGroup cols={2}>
+  <Card title="Mode 1: pymupdf4llm" icon="file-lines">
+    Fast text extraction from native PDFs with embedded text
+  </Card>
+  <Card title="Mode 2: OCR Tesseract" icon="scanner">
+    Optical character recognition for scanned/image-based PDFs
+  </Card>
+</CardGroup>
+
+## Automatic Fallback Logic
+
+The system automatically detects whether a PDF needs OCR:
+
+```python convertidor_pdf.py
+MIN_CHARS = 200   # Menos de esto → PDF escaneado → OCR
+OCR_DPI   = 300
+OCR_LANG  = "spa"
+
+def convertir_un_pdf(ruta_pdf, forzar_ocr=False):
+    texto, metodo = "", "ninguno"
+
+    if not forzar_ocr:
+        texto, metodo = convertir_con_pymupdf(ruta_pdf)
+
+    if len(texto) < MIN_CHARS:
+        if metodo == "pymupdf":
+            print(f"    ⚠ pymupdf extrajo {len(texto)} chars → OCR...")
+        texto, metodo = convertir_con_ocr(ruta_pdf)
+```
+
+<Info>
+  **Smart Detection**: If pymupdf extracts less than `MIN_CHARS` characters (default: 200), the system automatically switches to OCR mode
+</Info>
+
+## pymupdf4llm: Native PDF Extraction
+
+For PDFs with native text content:
+
+```python convertidor_pdf.py
+def convertir_con_pymupdf(ruta_pdf):
+    if not PYMUPDF_OK:
+        return "", "sin_pymupdf"
+    try:
+        texto = pymupdf4llm.to_markdown(ruta_pdf)
+        texto = re.sub(r'<!--.*?-->', '', texto, flags=re.DOTALL).strip()
+        return texto, "pymupdf"
+    except Exception as e:
+        return "", f"pymupdf_error:{e}"
+```
+
+### Features
+
+- **Direct Markdown output**: Preserves formatting, tables, and structure
+- **Comment removal**: HTML comments stripped from output
+- **Fast processing**: No image conversion needed
+- **Table preservation**: Complex tables maintained with high fidelity
+
+<Note>
+  In `convertidor.py`, pymupdf4llm is preferred over LibreOffice for PDF conversion: *"pymupdf4llm directo (mejor calidad para tablas)"*
+</Note>
+
+## OCR with Tesseract: Scanned PDFs
+
+For scanned documents or when native extraction fails:
+
+```python convertidor_pdf.py
+def convertir_con_ocr(ruta_pdf):
+    if not OCR_OK:
+        return "", "sin_ocr"
+    try:
+        print(f"    📷 Convirtiendo a imágenes (DPI={OCR_DPI})...")
+        paginas = convert_from_path(ruta_pdf, dpi=OCR_DPI)
+        print(f"    📄 {len(paginas)} página(s)")
+        partes = []
+        for i, pagina in enumerate(paginas, 1):
+            print(f"    🔍 OCR página {i}/{len(paginas)}...", end="\r")
+            texto_pag = pytesseract.image_to_string(pagina, lang=OCR_LANG)
+            texto_pag = limpiar_ocr(texto_pag)
+            if texto_pag.strip():
+                partes.append(f"\n\n<!-- Página {i} -->\n\n{texto_pag}")
+        print()
+        return "\n".join(partes).strip(), "ocr_tesseract"
+    except Exception as e:
+        return "", f"ocr_error:{e}"
+```
+
+### OCR Process Flow
+
+<Steps>
+  <Step title="Convert PDF to images">
+    Uses `pdf2image` with configurable DPI (default: 300)
+  </Step>
+  <Step title="Process each page">
+    Applies Tesseract OCR with Spanish language pack
+  </Step>
+  <Step title="Clean output">
+    Removes noise, excessive whitespace, and invalid characters
+  </Step>
+  <Step title="Combine pages">
+    Merges all pages with page markers
+  </Step>
+</Steps>
+
+## OCR Text Cleaning
+
+The OCR output is cleaned to remove artifacts:
+
+```python convertidor_pdf.py
+def limpiar_ocr(texto):
+    lineas = []
+    for linea in texto.split('\n'):
+        linea = linea.strip()
+        # Skip lines with fewer than 3 valid characters
+        if len(re.findall(r'[a-zA-ZáéíóúüñÁÉÍÓÚÜÑ0-9]', linea)) < 3:
+            continue
+        # Collapse excessive spaces
+        lineas.append(re.sub(r' {3,}', '  ', linea))
+    resultado = '\n'.join(lineas)
+    # Limit consecutive newlines to 3
+    return re.sub(r'\n{4,}', '\n\n\n', resultado)
+```
+
+### Cleaning Rules
+
+<AccordionGroup>
+  <Accordion title="Line validation">
+    Lines with fewer than 3 alphanumeric characters are discarded (likely OCR noise)
+  </Accordion>
+  <Accordion title="Space normalization">
+    Sequences of 3+ spaces collapsed to 2 spaces
+  </Accordion>
+  <Accordion title="Newline limiting">
+    Maximum of 3 consecutive newlines to prevent excessive whitespace
+  </Accordion>
+  <Accordion title="Character filtering">
+    Validates against Spanish alphabet including accented characters
+  </Accordion>
+</AccordionGroup>
+
+## Configuration
+
+Key configuration constants:
+
+```python convertidor_pdf.py
+MIN_CHARS = 200   # Threshold for OCR fallback
+OCR_DPI   = 300   # Image resolution for OCR
+OCR_LANG  = "spa" # Tesseract language (Spanish)
+```
+
+<Warning>
+  **DPI Trade-off**: Higher DPI (e.g., 600) improves OCR accuracy but significantly increases processing time and memory usage
+</Warning>
+
+## Command-Line Options
+
+### convertidor_pdf.py Usage
+
+<CodeGroup>
+
+```bash Default Mode (Auto-detect)
+# Convert all PDFs with automatic OCR fallback
+python3 convertidor_pdf.py
+```
+
+```bash Force OCR Mode
+# Apply OCR to all PDFs regardless of text content
+python3 convertidor_pdf.py --forzar-ocr
+```
+
+```bash Reconvert Empty Files
+# Only reconvert PDFs with empty or minimal output
+python3 convertidor_pdf.py --reconvertir
+```
+
+</CodeGroup>
+
+### Integration with convertidor.py
+
+The main converter includes PDF handling:
+
+```python convertidor.py
+# ── .pdf: pymupdf4llm directo (preferido en Linux) ─────────
+if suffix == ".pdf":
+    ok_directo, md_o_err = convert_pdf_directo(source_path)
+    if ok_directo:
+        encabezado = f"# {folder_name}\n\n"
+        md_path.write_text(encabezado + md_o_err, encoding="utf-8")
+        return True, "PDF convertido a Markdown con pymupdf4llm."
+
+    # Fallback: LibreOffice → .docx → python-docx
+    print(f"     pymupdf4llm falló ({md_o_err[:60]}), intentando LibreOffice...")
+    temp_dir = TEMP_DIR / f"{slugify_ascii(folder_name)}_{os.getpid()}"
+    ok_lo, docx_path, msg_lo = convert_to_docx_via_libreoffice(source_path, temp_dir)
+    if not ok_lo:
+        _write_error_md(md_path, folder_name, source_path.name, msg_lo)
+        return False, msg_lo
+    ok, md_or_err = docx_to_markdown(docx_path, folder_name)
+    if ok:
+        md_path.write_text(md_or_err, encoding="utf-8")
+        return True, "PDF convertido vía LibreOffice → .docx → Markdown."
+```
+
+<Info>
+  **Triple Fallback**: `convertidor.py` tries pymupdf4llm → LibreOffice → python-docx for maximum compatibility
+</Info>
+
+## File Paths
+
+### Linux Paths (Default)
+
+```python convertidor_pdf.py
+if sys.platform == "win32":
+    CARPETA_ENTRADA = r"C:\SIAA\pdfs_origen"
+    CARPETA_SALIDA  = r"C:\SIAA\Documentos_MD"
+else:
+    CARPETA_ENTRADA = "/opt/siaa/pdfs_origen"
+    CARPETA_SALIDA  = "/opt/siaa/fuentes/normativa"
+```
+
+## Output Format
+
+Generated Markdown includes metadata:
+
+```python convertidor_pdf.py
+fecha = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+metodo_str = "pymupdf4llm" if metodo == "pymupdf" else "OCR Tesseract"
+
+if texto.strip():
+    encabezado = f"<!-- Origen: {nombre_pdf} | Método: {metodo_str} | Convertido: {fecha} -->\n\n"
+    md_final = encabezado + texto
+    exito, icono = True, "✅"
+else:
+    md_final = (
+        f"<!-- Origen: {nombre_pdf} | ERROR: Sin texto extraíble | {fecha} -->\n\n"
+        f"**AVISO:** No fue posible extraer texto de este documento.\n"
+    )
+    exito, icono = False, "❌"
+```
+
+### Example Output Header
+
+```markdown
+<!-- Origen: documento_judicial.pdf | Método: pymupdf4llm | Convertido: 2026-03-08 14:32 -->
+
+# Content starts here...
+```
+
+## Installation
+
+<Steps>
+  <Step title="Install system dependencies">
+    ```bash
+    sudo dnf install tesseract tesseract-langpack-spa poppler-utils -y
+    ```
+  </Step>
+  <Step title="Install Python libraries">
+    ```bash
+    pip install pymupdf4llm pdf2image pytesseract --break-system-packages
+    ```
+  </Step>
+  <Step title="Verify Tesseract">
+    ```bash
+    tesseract --version
+    tesseract --list-langs  # Should show 'spa'
+    ```
+  </Step>
+  <Step title="Test conversion">
+    ```bash
+    python3 convertidor_pdf.py --forzar-ocr
+    ```
+  </Step>
+</Steps>
+
+## Performance Statistics
+
+The converter provides detailed output:
+
+```python convertidor_pdf.py
+print(f"\n{'='*55}")
+print(f"  ✅ pymupdf: {ok}  |  🔍 OCR: {ocr_count}  |  ❌ Error: {errores}")
+print(f"  Recarga: curl http://localhost:5000/siaa/recargar")
+print(f"{'='*55}")
+```
+
+### Example Output
+
+```
+=======================================================
+  SIAA Convertidor PDF v2.0
+  PDFs: 15 | Modo: Auto
+  Salida: /opt/siaa/fuentes/normativa
+=======================================================
+
+  📂 sentencia_123.pdf
+    ✅ sentencia_123.md → 12,456 chars [pymupdf4llm]
+  📂 escaneado_viejo.pdf
+    ⚠ pymupdf extrajo 45 chars → OCR...
+    📷 Convirtiendo a imágenes (DPI=300)...
+    📄 5 página(s)
+    🔍 OCR página 5/5...
+    ✅ escaneado_viejo.md → 8,234 chars [OCR Tesseract]
+
+=======================================================
+  ✅ pymupdf: 10  |  🔍 OCR: 4  |  ❌ Error: 1
+  Recarga: curl http://localhost:5000/siaa/recargar
+=======================================================
+```
+
+## File Naming
+
+PDF filenames are sanitized for filesystem compatibility:
+
+```python convertidor_pdf.py
+def sanitizar_nombre(nombre):
+    nombre = nombre.lower().replace(" ", "_")
+    nombre = re.sub(r'[^\w\-.]', '_', nombre)
+    return re.sub(r'_+', '_', nombre)
+```
+
+### Sanitization Rules
+
+- Lowercase conversion
+- Spaces replaced with underscores
+- Non-alphanumeric characters (except `-` and `.`) replaced with `_`
+- Multiple consecutive underscores collapsed to one
+
+<Check>
+  **Example**: `"Sentencia 2024-0123 (Final).pdf"` → `"sentencia_2024-0123__final_.md"`
+</Check>
+
+## Error Handling
+
+<AccordionGroup>
+  <Accordion title="pymupdf4llm not installed">
+    Returns: `("", "sin_pymupdf")` and attempts OCR fallback
+  </Accordion>
+  <Accordion title="Tesseract not installed">
+    Returns: `("", "sin_ocr")` and writes error Markdown
+  </Accordion>
+  <Accordion title="No extractable text">
+    Generates Markdown with warning: `"**AVISO:** No fue posible extraer texto de este documento."`
+  </Accordion>
+  <Accordion title="Conversion exception">
+    Captures exception and returns: `("", f"pymupdf_error:{e}")` or `("", f"ocr_error:{e}")`
+  </Accordion>
+</AccordionGroup>
+
+## Metadata Tracking
+
+The system tracks conversion method for each file:
+
+```python convertidor_pdf.py
+return {
+    "nombre_md": nombre_md,
+    "metodo": metodo,
+    "chars": len(texto),
+    "exito": exito
+}
+```
+
+This enables:
+- Quality analysis per conversion method
+- Identification of files that needed OCR
+- Character count tracking
+- Success/failure statistics

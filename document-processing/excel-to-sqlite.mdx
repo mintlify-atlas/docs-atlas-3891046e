@@ -1,0 +1,456 @@
+---
+title: Excel to SQLite Conversion
+description: Convert Excel spreadsheets to SQLite database tables with automatic column sanitization
+---
+
+# Excel to SQLite Conversion
+
+SIAA automatically converts Excel files (`.xls`, `.xlsx`) into SQLite database tables for efficient querying and data management.
+
+## Conversion Function
+
+The `excel_to_sqlite()` function handles the complete conversion process:
+
+```python convertidor.py
+def excel_to_sqlite(excel_path: Path, conn: sqlite3.Connection,
+                    table_name: str) -> tuple[bool, int, str]:
+    suffix = excel_path.suffix.lower()
+    if suffix not in (".xls", ".xlsx"):
+        return False, 0, f"Extensión Excel no soportada: {suffix}"
+    try:
+        engine = "xlrd" if suffix == ".xls" else "openpyxl"
+        df = pd.read_excel(excel_path, engine=engine)
+    except Exception as exc:
+        return False, 0, f"No se pudo leer Excel: {exc}"
+
+    cleaned = [sanitize_column(c) for c in df.columns.tolist()]
+    df.columns = make_unique_columns(cleaned)
+    conn.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+    df.to_sql(table_name, conn, if_exists="replace", index=False)
+    return True, int(len(df)), "Tabla creada/reemplazada."
+```
+
+## Supported Formats
+
+<CardGroup cols={2}>
+  <Card title=".xlsx Files" icon="file-excel">
+    Modern Excel format (Office 2007+) using `openpyxl` engine
+  </Card>
+  <Card title=".xls Files" icon="file-excel">
+    Legacy Excel format (Office 97-2003) using `xlrd` engine
+  </Card>
+</CardGroup>
+
+## Column Sanitization
+
+Column names are sanitized to ensure SQL compatibility:
+
+```python convertidor.py
+def sanitize_column(name: Any) -> str:
+    return slugify_ascii("" if name is None else str(name)) or "columna"
+
+
+def slugify_ascii(name: str) -> str:
+    normalized = unicodedata.normalize("NFKD", name)
+    ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
+    collapsed  = re.sub(r"[\s\-/]+", "_", ascii_only.lower())
+    cleaned    = re.sub(r"[^a-z0-9_]", "", collapsed)
+    cleaned    = re.sub(r"_+", "_", cleaned).strip("_")
+    return cleaned or "sin_nombre"
+```
+
+### Sanitization Process
+
+<Steps>
+  <Step title="Unicode normalization">
+    Convert to NFKD form and remove accents: `"Número"` → `"Numero"`
+  </Step>
+  <Step title="ASCII conversion">
+    Encode to ASCII, ignoring non-ASCII characters
+  </Step>
+  <Step title="Lowercase and replace separators">
+    Spaces, hyphens, slashes → underscores: `"Fecha Inicio"` → `"fecha_inicio"`
+  </Step>
+  <Step title="Remove invalid characters">
+    Keep only `a-z`, `0-9`, `_`
+  </Step>
+  <Step title="Collapse underscores">
+    Multiple underscores → single underscore
+  </Step>
+  <Step title="Fallback for empty results">
+    If result is empty, use `"sin_nombre"`
+  </Step>
+</Steps>
+
+### Sanitization Examples
+
+<CodeGroup>
+
+```python Original → Sanitized
+"Nombre Completo"     → "nombre_completo"
+"Fecha de Nacimiento" → "fecha_de_nacimiento"
+"Código (2024)"       → "codigo_2024"
+"N° Documento"        → "n_documento"
+"Año/Mes"             → "ano_mes"
+"Cédula#"             → "cedula"
+""                    → "columna"
+None                  → "columna"
+```
+
+</CodeGroup>
+
+## Handling Duplicate Column Names
+
+Duplicate column names are automatically made unique:
+
+```python convertidor.py
+def make_unique_columns(columns: list[str]) -> list[str]:
+    used:   dict[str, int] = {}
+    unique: list[str]      = []
+    for col in columns:
+        base  = col or "columna"
+        count = used.get(base, 0) + 1
+        used[base] = count
+        unique.append(base if count == 1 else f"{base}_{count}")
+    return unique
+```
+
+### Duplicate Handling Logic
+
+<Info>
+  First occurrence keeps original name; subsequent duplicates get `_2`, `_3`, etc.
+</Info>
+
+**Example:**
+
+| Original Columns | Sanitized Unique Columns |
+|-----------------|-------------------------|
+| `"Nombre"`, `"Nombre"`, `"Nombre"` | `"nombre"`, `"nombre_2"`, `"nombre_3"` |
+| `""`, `""`, `"Dato"` | `"columna"`, `"columna_2"`, `"dato"` |
+
+## Table Naming
+
+Table names are generated from folder names using the same slugification:
+
+```python convertidor.py
+def process_folder(folder_path: Path, md_dir: Path, conn: sqlite3.Connection,
+                   errors: list[str], results: list[FolderResult],
+                   convert_doc: bool) -> None:
+    folder_name = folder_path.name
+    slug        = slugify_ascii(folder_name)
+    # ...
+    if len(excel_files) == 1:
+        ok, rows, msg = excel_to_sqlite(excel_files[0], conn, slug)
+```
+
+<Warning>
+  **Table Replacement**: Existing tables with the same name are dropped before insertion: `DROP TABLE IF EXISTS "{table_name}"`
+</Warning>
+
+## Database Structure
+
+### Connection and Storage
+
+```python convertidor.py
+DEFAULT_DB = Path("/opt/siaa/institucional.db")  # Base de datos SQLite
+
+# In main processing:
+with sqlite3.connect(db_path) as conn:
+    for folder in subfolders:
+        process_folder(folder, dest_md, conn, errors, results, convert_doc)
+    conn.commit()
+```
+
+### Pandas Integration
+
+Conversion uses pandas for data handling:
+
+```python
+engine = "xlrd" if suffix == ".xls" else "openpyxl"
+df = pd.read_excel(excel_path, engine=engine)
+# ... sanitization ...
+df.to_sql(table_name, conn, if_exists="replace", index=False)
+```
+
+<Note>
+  **Index Exclusion**: `index=False` prevents pandas row indices from being stored as a column
+</Note>
+
+## Querying Converted Data
+
+Once converted, data can be queried using standard SQL:
+
+```python
+import sqlite3
+
+conn = sqlite3.connect('/opt/siaa/institucional.db')
+
+# List all tables
+cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+tables = cursor.fetchall()
+
+# Query specific table
+for row in conn.execute('SELECT * FROM "juzgado_civil_municipal" LIMIT 10'):
+    print(row)
+
+# Count rows
+count = conn.execute('SELECT COUNT(*) FROM "juzgado_civil_municipal"').fetchone()[0]
+print(f"Total rows: {count}")
+```
+
+### Query Examples
+
+<CodeGroup>
+
+```sql Basic SELECT
+SELECT * FROM "juzgado_civil_municipal"
+WHERE fecha_inicio >= '2024-01-01'
+ORDER BY numero_proceso;
+```
+
+```sql Column Search
+SELECT nombre_completo, cedula, estado
+FROM "registro_personal"
+WHERE estado = 'Activo';
+```
+
+```sql Aggregations
+SELECT tipo_proceso, COUNT(*) as total
+FROM "juzgado_civil_municipal"
+GROUP BY tipo_proceso
+ORDER BY total DESC;
+```
+
+```sql JOIN Example
+SELECT a.nombre, b.proceso
+FROM "registro_personal" a
+INNER JOIN "juzgado_civil_municipal" b
+  ON a.cedula = b.responsable_cedula;
+```
+
+</CodeGroup>
+
+## Complete Processing Flow
+
+The system processes folders containing both Word/PDF and Excel files:
+
+```python convertidor.py
+def process_folder(folder_path: Path, md_dir: Path, conn: sqlite3.Connection,
+                   errors: list[str], results: list[FolderResult],
+                   convert_doc: bool) -> None:
+    folder_name = folder_path.name
+    slug        = slugify_ascii(folder_name)
+    md_path     = md_dir / f"{slug}.md"
+    result      = FolderResult(folder_name=folder_name, slug=slug, md_path=md_path)
+
+    files       = [p for p in folder_path.iterdir() if p.is_file()]
+    word_files  = [p for p in files if p.suffix.lower() in (".doc", ".docx")]
+    pdf_files   = [p for p in files if p.suffix.lower() == ".pdf"]
+    excel_files = [p for p in files if p.suffix.lower() in (".xls", ".xlsx")]
+
+    # ... Word/PDF processing ...
+
+    # Excel → SQLite
+    if len(excel_files) != 1:
+        msg = f"Se esperaba 1 Excel y se encontraron {len(excel_files)}."
+        result.sql_ok, result.sql_msg = False, msg
+        result.errors.append(msg)
+    else:
+        try:
+            ok, rows, msg = excel_to_sqlite(excel_files[0], conn, slug)
+            result.sql_ok, result.sql_rows, result.sql_msg = ok, rows, msg
+            if not ok:
+                result.errors.append(msg)
+        except Exception as exc:
+            msg = f"Fallo Excel→SQLite: {exc}"
+            result.sql_ok, result.sql_msg = False, msg
+            result.errors.append(msg)
+```
+
+<Info>
+  **Folder Expectation**: Each folder should contain **exactly 1** Excel file. Multiple or zero Excel files trigger a warning.
+</Info>
+
+## Verification and Statistics
+
+After conversion, the system provides detailed statistics:
+
+```python convertidor.py
+def print_verification(md_dir: Path, conn: sqlite3.Connection,
+                        results: list[FolderResult], errors: list[str]) -> None:
+    print("\n=== Tablas SQLite ===")
+    for r in [r for r in results if r.sql_ok]:
+        count = conn.execute(f'SELECT COUNT(*) FROM "{r.slug}"').fetchone()[0]
+        print(f"  {r.slug}: {count} filas")
+
+    total   = len(results)
+    sql_ok  = sum(1 for r in results if r.sql_ok)
+    print(f"\n=== Resumen ===")
+    print(f"  Excel   → SQLite    : {sql_ok} ✅  {total - sql_ok} ❌")
+```
+
+### Example Output
+
+```
+=== Tablas SQLite ===
+  juzgado_civil_municipal: 245 filas
+  juzgado_penal_circuito: 189 filas
+  registro_personal: 67 filas
+
+=== Resumen ===
+  Carpetas procesadas : 15
+  Word/PDF → Markdown : 14 ✅  1 ❌
+  Excel   → SQLite    : 13 ✅  2 ❌
+  Carpetas con errores: 3
+```
+
+## Error Handling
+
+<AccordionGroup>
+  <Accordion title="Unsupported file extension">
+    Returns: `(False, 0, f"Extensión Excel no soportada: {suffix}")`
+  </Accordion>
+  <Accordion title="Read error">
+    Returns: `(False, 0, f"No se pudo leer Excel: {exc}")`
+  </Accordion>
+  <Accordion title="Multiple Excel files">
+    Warning: `"Se esperaba 1 Excel y se encontraron {count}."`
+  </Accordion>
+  <Accordion title="No Excel files">
+    Warning: `"Se esperaba 1 Excel y se encontraron 0."`
+  </Accordion>
+  <Accordion title="Conversion exception">
+    Error: `f"Fallo Excel→SQLite: {exc}"`
+  </Accordion>
+</AccordionGroup>
+
+## Data Types
+
+Pandas automatically infers SQL data types:
+
+<CardGroup cols={2}>
+  <Card title="Integers" icon="hashtag">
+    Python `int` / NumPy `int64` → SQLite `INTEGER`
+  </Card>
+  <Card title="Floats" icon="calculator">
+    Python `float` / NumPy `float64` → SQLite `REAL`
+  </Card>
+  <Card title="Strings" icon="quote-left">
+    Python `str` / pandas `object` → SQLite `TEXT`
+  </Card>
+  <Card title="Dates" icon="calendar">
+    pandas `datetime64` → SQLite `TEXT` (ISO format)
+  </Card>
+</CardGroup>
+
+## Command-Line Usage
+
+<CodeGroup>
+
+```bash Convert All Folders
+# Process all folders in /opt/siaa/instructivos
+python3 convertidor.py
+```
+
+```bash Custom Database Path
+# Specify custom SQLite database location
+python3 convertidor.py --db /ruta/custom.db
+```
+
+```bash Specific Folder
+# Process only one folder's Excel file
+python3 convertidor.py --only-folder "Juzgado Civil Municipal"
+```
+
+```bash Multiple Specific Folders
+# Process multiple folders
+python3 convertidor.py \
+  --only-folder "Juzgado Civil Municipal" \
+  --only-folder "Juzgado Penal Circuito"
+```
+
+</CodeGroup>
+
+## Installation
+
+<Steps>
+  <Step title="Install pandas">
+    ```bash
+    pip install pandas --break-system-packages
+    ```
+  </Step>
+  <Step title="Install Excel engines">
+    ```bash
+    pip install openpyxl xlrd --break-system-packages
+    ```
+  </Step>
+  <Step title="Verify installation">
+    ```bash
+    python3 -c "import pandas; import openpyxl; import xlrd; print('OK')"
+    ```
+  </Step>
+  <Step title="Test conversion">
+    ```bash
+    python3 convertidor.py --only-folder "Test"
+    ```
+  </Step>
+</Steps>
+
+## Performance Considerations
+
+<Warning>
+  **Large Files**: Excel files with 100,000+ rows may take several seconds to convert. Consider breaking them into smaller files.
+</Warning>
+
+<Check>
+  **Efficient**: SQLite provides fast querying once data is converted, even for large datasets
+</Check>
+
+## Integration Example
+
+Complete folder processing example:
+
+```python
+from pathlib import Path
+import sqlite3
+
+# Setup
+db_path = Path("/opt/siaa/institucional.db")
+conn = sqlite3.connect(db_path)
+
+# Convert
+excel_file = Path("/opt/siaa/instructivos/Juzgado Civil/datos.xlsx")
+table_name = "juzgado_civil"
+
+ok, rows, msg = excel_to_sqlite(excel_file, conn, table_name)
+
+if ok:
+    print(f"✅ Converted {rows} rows to table '{table_name}'")
+    
+    # Verify
+    cursor = conn.execute(f'SELECT COUNT(*) FROM "{table_name}"')
+    count = cursor.fetchone()[0]
+    print(f"Table contains {count} rows")
+    
+    # Sample data
+    cursor = conn.execute(f'SELECT * FROM "{table_name}" LIMIT 5')
+    for row in cursor:
+        print(row)
+else:
+    print(f"❌ Conversion failed: {msg}")
+
+conn.close()
+```
+
+## Result Structure
+
+The conversion returns a tuple:
+
+```python
+(success: bool, row_count: int, message: str)
+```
+
+**Examples:**
+- `(True, 245, "Tabla creada/reemplazada.")` ✅
+- `(False, 0, "Extensión Excel no soportada: .csv")` ❌
+- `(False, 0, "No se pudo leer Excel: File not found")` ❌

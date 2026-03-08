@@ -1,0 +1,453 @@
+---
+title: System Monitoring
+description: Health checks, status monitoring, and real-time metrics for SIAA
+icon: chart-line
+---
+
+## Overview
+
+SIAA provides comprehensive monitoring capabilities through the `/siaa/status` endpoint and automatic health checking systems. This page covers all monitoring features and how to interpret system metrics.
+
+## Status Endpoint
+
+The primary monitoring interface is the `/siaa/status` endpoint:
+
+```bash
+curl http://localhost:5000/siaa/status
+```
+
+### Response Format
+
+```json
+{
+  "version": "2.1.25",
+  "estado": "ok",
+  "cache": {
+    "entradas": 47,
+    "max": 200,
+    "hits": 123,
+    "misses": 89,
+    "hit_rate": "58.0%",
+    "ttl_seg": 3600
+  },
+  "ollama": true,
+  "ollama_fallos": 0,
+  "modelo": "qwen2.5:3b",
+  "warmup_completado": true,
+  "usuarios_activos": 2,
+  "total_atendidos": 156,
+  "total_documentos": 18,
+  "total_chunks": 342,
+  "indice_terminos": 2847,
+  "chunk_size": 800,
+  "chunk_overlap": 300,
+  "colecciones": {
+    "general": {
+      "docs": ["acuerdo_psaa16-10476.md", "..." ],
+      "total": 12
+    },
+    "normativa": {
+      "docs": ["circular_001.md", "..."],
+      "total": 6
+    }
+  }
+}
+```
+
+### Status Fields Reference
+
+<ResponseField name="version" type="string">
+  SIAA system version (e.g., "2.1.25")
+</ResponseField>
+
+<ResponseField name="estado" type="string">
+  Overall system state: `"ok"` or `"error"`. Returns `"error"` if Ollama is unavailable.
+</ResponseField>
+
+<ResponseField name="ollama" type="boolean">
+  Whether Ollama AI service is currently available and responding.
+</ResponseField>
+
+<ResponseField name="ollama_fallos" type="integer">
+  Number of consecutive failed Ollama health checks. Resets to 0 on successful check.
+</ResponseField>
+
+<ResponseField name="modelo" type="string">
+  Currently configured Ollama model identifier.
+</ResponseField>
+
+<ResponseField name="warmup_completado" type="boolean">
+  Whether the initial model warm-up completed successfully.
+  - `true`: Model loaded in RAM, ready for fast inference
+  - `false`: Warm-up failed (check Ollama logs)
+  - `null`: Warm-up not yet attempted
+</ResponseField>
+
+<ResponseField name="usuarios_activos" type="integer">
+  Number of currently active query sessions.
+</ResponseField>
+
+<ResponseField name="total_atendidos" type="integer">
+  Total number of queries processed since server start (cumulative counter).
+</ResponseField>
+
+<ResponseField name="total_documentos" type="integer">
+  Total documents loaded across all collections.
+</ResponseField>
+
+<ResponseField name="total_chunks" type="integer">
+  Total pre-computed chunks across all documents.
+</ResponseField>
+
+<ResponseField name="indice_terminos" type="integer">
+  Number of unique terms in the document density index.
+</ResponseField>
+
+## Ollama Health Check System
+
+### Automatic Health Monitoring
+
+SIAA runs a background thread that checks Ollama health every 15 seconds:
+
+```python
+def verificar_ollama() -> bool:
+    try:
+        r = requests.get(f"{OLLAMA_URL}/api/tags", timeout=TIMEOUT_HEALTH)
+        ok = (r.status_code == 200)
+    except Exception:
+        ok = False
+    # Update global state
+    ollama_estado["disponible"] = ok
+    ollama_estado["ultimo_check"] = time.time()
+    ollama_estado["fallos"] = 0 if ok else ollama_estado["fallos"] + 1
+    return ok
+```
+
+### Health Check Interval
+
+The monitoring loop runs continuously:
+
+```python
+def _monitor_loop():
+    while True:
+        verificar_ollama()
+        time.sleep(15)  # Check every 15 seconds
+```
+
+### Manual Health Check
+
+Trigger an immediate health check:
+
+```bash
+curl http://localhost:11434/api/tags
+```
+
+A successful response indicates Ollama is healthy:
+
+```json
+{
+  "models": [
+    {
+      "name": "qwen2.5:3b",
+      "modified_at": "2026-03-08T10:30:00Z",
+      "size": 1900000000
+    }
+  ]
+}
+```
+
+## Ollama Warm-up Monitoring
+
+### What is Warm-up?
+
+When SIAA starts, it preloads the AI model into RAM to avoid first-query latency:
+
+```python
+requests.post(
+    f"{OLLAMA_URL}/api/chat",
+    json={
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "ok"}],
+        "stream": False,
+        "options": {"num_predict": 1, "num_ctx": 64}
+    },
+    timeout=(10, 35)
+)
+```
+
+### Checking Warm-up Status
+
+```bash
+curl http://localhost:5000/siaa/status | jq '.warmup_completado'
+```
+
+**Possible values:**
+- `true` — Model successfully loaded, ready for queries
+- `false` — Warm-up failed (check logs)
+- `null` — Warm-up not yet attempted
+
+### Warm-up Console Output
+
+```bash
+[Ollama] Precargando qwen2.5:3b en RAM...
+[Ollama] qwen2.5:3b listo en RAM ✓
+```
+
+<Warning>
+  If warm-up fails, the first user query will be slower (~15-30s) as the model loads on-demand.
+</Warning>
+
+## Active Users Tracking
+
+### Real-Time User Count
+
+SIAA tracks concurrent active queries:
+
+```bash
+curl http://localhost:5000/siaa/status | jq '.usuarios_activos'
+```
+
+### Implementation
+
+Active user count is managed with thread-safe counters:
+
+```python
+usuarios_activos = 0
+total_atendidos = 0
+contadores_lock = threading.Lock()
+
+def inc_activos():
+    global usuarios_activos, total_atendidos
+    with contadores_lock:
+        usuarios_activos += 1
+        total_atendidos += 1
+
+def dec_activos():
+    global usuarios_activos
+    with contadores_lock:
+        usuarios_activos = max(0, usuarios_activos - 1)
+```
+
+### Monitoring Load
+
+<Tabs>
+  <Tab title="Low Load">
+    **usuarios_activos: 0-2**
+    
+    Normal operation. Queries process quickly with minimal queuing.
+  </Tab>
+  <Tab title="Medium Load">
+    **usuarios_activos: 3-5**
+    
+    Moderate load. Some queries may wait for semaphore (max 2 concurrent Ollama requests).
+  </Tab>
+  <Tab title="High Load">
+    **usuarios_activos: 6+**
+    
+    Heavy load. Consider increasing `MAX_OLLAMA_SIMULTANEOS` or adding more resources.
+  </Tab>
+</Tabs>
+
+## Cache Statistics
+
+### Cache Metrics
+
+The status endpoint includes detailed cache performance data:
+
+```json
+"cache": {
+  "entradas": 47,      // Current entries in cache
+  "max": 200,          // Maximum capacity
+  "hits": 123,         // Total cache hits
+  "misses": 89,        // Total cache misses
+  "hit_rate": "58.0%", // Hit rate percentage
+  "ttl_seg": 3600      // Entry lifetime in seconds
+}
+```
+
+### Cache Performance Indicators
+
+<AccordionGroup>
+  <Accordion title="Hit Rate 40%+ (Excellent)">
+    Optimal performance. 40% or more queries served from cache, drastically reducing AI processing load.
+  </Accordion>
+  <Accordion title="Hit Rate 20-40% (Good)">
+    Healthy cache utilization. Common queries are being cached effectively.
+  </Accordion>
+  <Accordion title="Hit Rate &lt;20% (Review)">
+    Low cache utilization. Consider:
+    - Increasing `CACHE_MAX_ENTRADAS`
+    - Increasing `CACHE_TTL_SEGUNDOS`
+    - Checking if queries are too diverse
+  </Accordion>
+</AccordionGroup>
+
+### Cache Saturation
+
+Monitor cache capacity:
+
+```bash
+curl -s http://localhost:5000/siaa/status | jq '.cache.entradas, .cache.max'
+```
+
+If `entradas` consistently equals `max`, the cache is full and using LRU eviction. Consider increasing `CACHE_MAX_ENTRADAS`.
+
+## Connection Status Indicators
+
+### Understanding Estado Field
+
+The `estado` field provides a quick health summary:
+
+```bash
+curl http://localhost:5000/siaa/status | jq '.estado'
+```
+
+- **"ok"**: All systems operational (Ollama available)
+- **"error"**: Critical failure (Ollama unavailable)
+
+### Failure Detection
+
+When Ollama fails, the system responds gracefully:
+
+```python
+if not disponible:
+    return Response(
+        'data: {"choices":[{"delta":{"content":"⚠ Servidor IA no disponible."}}]}',
+        content_type="text/event-stream"
+    )
+```
+
+Clients receive a user-friendly error message instead of hanging or crashing.
+
+## System Metrics Available
+
+### Document Processing Metrics
+
+```bash
+# Total documents loaded
+curl http://localhost:5000/siaa/status | jq '.total_documentos'
+
+# Total chunks pre-computed
+curl http://localhost:5000/siaa/status | jq '.total_chunks'
+
+# Average chunks per document
+curl -s http://localhost:5000/siaa/status | \
+  jq '.total_chunks / .total_documentos'
+```
+
+### Collection Breakdown
+
+```bash
+# List all collections and their document counts
+curl http://localhost:5000/siaa/status | jq '.colecciones'
+```
+
+Example output:
+
+```json
+{
+  "general": {
+    "docs": [
+      "acuerdo_psaa16-10476.md",
+      "circular_2019.md"
+    ],
+    "total": 2
+  },
+  "normativa": {
+    "docs": ["resolucion_001.md"],
+    "total": 1
+  }
+}
+```
+
+## Monitoring Best Practices
+
+### Regular Health Checks
+
+Set up periodic monitoring with cron:
+
+```bash
+# Add to /etc/cron.d/siaa-monitor
+*/5 * * * * root curl -sf http://localhost:5000/siaa/status > /dev/null || systemctl restart siaa
+```
+
+### Alerting on Failures
+
+Monitor `ollama_fallos` for sustained failures:
+
+```bash
+#!/bin/bash
+# alert-on-failures.sh
+FAILURES=$(curl -s http://localhost:5000/siaa/status | jq '.ollama_fallos')
+if [ "$FAILURES" -gt 3 ]; then
+  echo "ALERT: Ollama has failed $FAILURES consecutive health checks" | mail -s "SIAA Alert" admin@example.com
+fi
+```
+
+### Dashboard Integration
+
+Integrate with monitoring dashboards:
+
+<CodeGroup>
+
+```bash Prometheus
+# scrape_configs in prometheus.yml
+- job_name: 'siaa'
+  metrics_path: '/siaa/status'
+  static_configs:
+    - targets: ['localhost:5000']
+```
+
+```bash Grafana Query
+# Use JSON API datasource
+curl http://localhost:5000/siaa/status
+```
+
+</CodeGroup>
+
+## Troubleshooting
+
+### Ollama Unavailable
+
+**Symptom**: `"ollama": false` in status endpoint
+
+**Check:**
+
+```bash
+# Is Ollama running?
+systemctl status ollama
+
+# Can SIAA reach Ollama?
+curl http://localhost:11434/api/tags
+
+# Check firewall
+sudo iptables -L -n | grep 11434
+```
+
+### Warm-up Failures
+
+**Symptom**: `"warmup_completado": false`
+
+**Solutions:**
+- Check Ollama logs: `journalctl -u ollama -n 50`
+- Verify model exists: `ollama list`
+- Increase warm-up timeout in code (currently 35s)
+
+### High Active Users with No Activity
+
+**Symptom**: `usuarios_activos` stays high despite no queries
+
+**Cause**: Possible exception preventing `dec_activos()` call
+
+**Solution**: Check application logs for uncaught exceptions
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Log Analysis" icon="file-lines" href="/administration/log-analysis">
+    Analyze query performance and quality trends
+  </Card>
+  <Card title="Cache Management" icon="database" href="/administration/cache-management">
+    Optimize cache for better performance
+  </Card>
+</CardGroup>

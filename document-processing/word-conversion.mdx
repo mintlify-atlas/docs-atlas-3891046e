@@ -1,0 +1,332 @@
+---
+title: Word Document Conversion
+description: Convert Word documents (.doc, .docx) to Markdown with table extraction and heading detection
+---
+
+# Word Document Conversion
+
+SIAA converts Word documents to Markdown format using **python-docx** for direct `.docx` processing and **LibreOffice headless** for legacy `.doc` format conversion.
+
+## Conversion Strategy
+
+<Steps>
+  <Step title=".docx files">
+    Direct conversion using `python-docx` library — no intermediate format needed
+  </Step>
+  <Step title=".doc files">
+    Two-stage conversion: LibreOffice converts `.doc` → `.docx`, then python-docx processes it
+  </Step>
+</Steps>
+
+## Direct .docx Conversion
+
+The `docx_to_markdown()` function handles native `.docx` files:
+
+```python convertidor.py
+def docx_to_markdown(docx_path: Path, folder_name: str) -> tuple[bool, str]:
+    """Extrae texto y tablas de .docx a Markdown usando python-docx."""
+    if docx is None:
+        return False, "python-docx no instalado: pip install python-docx --break-system-packages"
+
+    document = docx.Document(str(docx_path))
+    lines: list[str] = [f"# {folder_name}", ""]
+
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        if not text:
+            continue
+        style_name = (paragraph.style.name or "").lower()
+        if "heading" in style_name:
+            level_match = re.search(r"(\d+)", style_name)
+            level = int(level_match.group(1)) if level_match else 2
+            level = max(1, min(level, 6))
+            lines.extend([f"{'#' * level} {text}", ""])
+        else:
+            lines.extend([text, ""])
+
+    for table in document.tables:
+        table_rows = [[_safe_cell(cell.text) for cell in row.cells] for row in table.rows]
+        md_table = markdown_table(table_rows)
+        if md_table:
+            lines.extend([md_table, ""])
+
+    return True, "\n".join(lines).strip() + "\n"
+```
+
+### Features Extracted
+
+<CardGroup cols={2}>
+  <Card title="Paragraphs" icon="paragraph">
+    Regular text content preserved with proper spacing
+  </Card>
+  <Card title="Headings" icon="heading">
+    Detected from style names (Heading 1-6) and converted to Markdown headers
+  </Card>
+  <Card title="Tables" icon="table">
+    Extracted and formatted as Markdown tables with proper escaping
+  </Card>
+  <Card title="Cell Safety" icon="shield-check">
+    Pipe characters escaped, newlines removed to prevent table breakage
+  </Card>
+</CardGroup>
+
+## Legacy .doc Conversion
+
+### LibreOffice Conversion Function
+
+For `.doc` files, SIAA uses LibreOffice in headless mode:
+
+```python convertidor.py
+def convert_to_docx_via_libreoffice(input_path: Path, output_dir: Path) -> tuple[bool, Path | None, str]:
+    """
+    Convierte .doc o .pdf a .docx usando LibreOffice headless.
+
+    Reemplaza completamente la función convert_to_docx_via_word
+    que usaba PowerShell + Word COM en Windows.
+
+    Args:
+        input_path: archivo .doc o .pdf de entrada
+        output_dir: directorio donde LibreOffice dejará el .docx resultante
+
+    Returns:
+        (exito, ruta_docx_resultante, mensaje)
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not _libreoffice_disponible():
+        return False, None, (
+            "LibreOffice no está instalado. "
+            "Instale con: sudo dnf install libreoffice-headless"
+        )
+
+    cmd = [
+        _cmd_libreoffice(),
+        "--headless",
+        "--norestore",
+        "--convert-to", "docx",
+        "--outdir", str(output_dir),
+        str(input_path),
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120   # 2 minutos máximo por archivo
+        )
+    except subprocess.TimeoutExpired:
+        return False, None, "LibreOffice tardó más de 2 minutos — archivo puede estar corrupto."
+    except FileNotFoundError:
+        return False, None, "LibreOffice no encontrado. Instale: sudo dnf install libreoffice-headless"
+
+    if result.returncode != 0:
+        detalle = result.stderr.strip() or result.stdout.strip() or "error desconocido"
+        return False, None, f"LibreOffice error (código {result.returncode}): {detalle[:200]}"
+
+    # LibreOffice guarda el .docx con el mismo nombre de stem en output_dir
+    docx_esperado = output_dir / (input_path.stem + ".docx")
+    if not docx_esperado.exists():
+        # A veces LibreOffice cambia ligeramente el nombre — buscar en el dir
+        candidatos = list(output_dir.glob("*.docx"))
+        if candidatos:
+            docx_esperado = max(candidatos, key=lambda p: p.stat().st_mtime)
+        else:
+            return False, None, "LibreOffice reportó éxito pero no generó archivo .docx."
+
+    return True, docx_esperado, "Conversión a .docx completada con LibreOffice."
+```
+
+### Command-Line Usage
+
+<CodeGroup>
+
+```bash Default Conversion
+# Convert all folders in /opt/siaa/instructivos
+python3 convertidor.py
+```
+
+```bash Custom Paths
+# Specify source and destination
+python3 convertidor.py --origen /ruta/origen --dest-md /ruta/salida
+```
+
+```bash Single Folder
+# Process only one specific folder
+python3 convertidor.py --only-folder "Juzgado Civil Municipal"
+```
+
+```bash Disable .doc Conversion
+# Skip .doc files (only process .docx)
+python3 convertidor.py --no-convert-doc-to-docx
+```
+
+</CodeGroup>
+
+## Table Extraction
+
+Tables are converted to Markdown format with automatic normalization:
+
+```python convertidor.py
+def markdown_table(rows: list[list[str]]) -> str:
+    if not rows:
+        return ""
+    width      = max(len(row) for row in rows)
+    normalized = [row + [""] * (width - len(row)) for row in rows]
+    header, body = normalized[0], normalized[1:]
+    lines = [
+        f"| {' | '.join(header)} |",
+        f"| {' | '.join(['---'] * width)} |",
+    ]
+    lines.extend(f"| {' | '.join(r)} |" for r in body)
+    return "\n".join(lines)
+
+
+def _safe_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).replace("\n", " ").strip().replace("|", "\\|")
+```
+
+### Table Features
+
+- **Automatic width normalization**: Short rows padded with empty cells
+- **Header detection**: First row becomes table header
+- **Pipe escaping**: `|` characters escaped as `\|` to prevent table breakage
+- **Newline removal**: Multi-line cells flattened to single line
+
+## Heading Detection
+
+Headings are detected from Word's built-in styles:
+
+```python
+style_name = (paragraph.style.name or "").lower()
+if "heading" in style_name:
+    level_match = re.search(r"(\d+)", style_name)
+    level = int(level_match.group(1)) if level_match else 2
+    level = max(1, min(level, 6))
+    lines.extend([f"{'#' * level} {text}", ""])
+```
+
+<Info>
+  **Style Mapping**: "Heading 1" → `#`, "Heading 2" → `##`, etc. up to H6
+</Info>
+
+## Error Handling
+
+When conversion fails, an error Markdown file is generated:
+
+```python convertidor.py
+def _write_error_md(md_path: Path, folder_name: str, archivo: str, detalle: str) -> None:
+    """Escribe un Markdown de error cuando la conversión falla."""
+    contenido = (
+        f"# {folder_name}\n\n"
+        "## Estado de conversion\n\n"
+        f"- Archivo detectado: `{archivo}`\n"
+        "- Resultado: ERROR\n"
+        f"- Detalle: {detalle}\n"
+    )
+    md_path.write_text(contenido, encoding="utf-8")
+```
+
+Error scenarios handled:
+
+<AccordionGroup>
+  <Accordion title="python-docx not installed">
+    Returns error message: `"python-docx no instalado: pip install python-docx --break-system-packages"`
+  </Accordion>
+  <Accordion title="LibreOffice not found">
+    Returns error message: `"LibreOffice no está instalado. Instale con: sudo dnf install libreoffice-headless"`
+  </Accordion>
+  <Accordion title="Conversion timeout">
+    LibreOffice conversion times out after 120 seconds with message: `"LibreOffice tardó más de 2 minutos — archivo puede estar corrupto."`
+  </Accordion>
+  <Accordion title="Empty document">
+    Generates valid Markdown with status message: `"OK sin contenido textual visible"`
+  </Accordion>
+</AccordionGroup>
+
+## File Paths
+
+<Note>
+  **Linux Migration**: All Windows paths (`C:\SIAA\...`) have been replaced with Linux equivalents (`/opt/siaa/...`)
+</Note>
+
+### Default Paths
+
+```python convertidor.py
+DEFAULT_ORIGEN  = Path("/opt/siaa/instructivos")            # Carpetas con Word + Excel
+DEFAULT_DEST_MD = Path("/opt/siaa/fuentes")                 # Salida .md (colección general)
+DEFAULT_LOG     = Path("/opt/siaa/logs/conversion_errores.log")
+TEMP_DIR        = Path("/tmp/siaa_temp")                    # Antes: C:\Users\...\AppData\Temp
+```
+
+## Installation
+
+<Steps>
+  <Step title="Install LibreOffice">
+    ```bash
+    sudo dnf install libreoffice-headless
+    ```
+  </Step>
+  <Step title="Install Python dependencies">
+    ```bash
+    pip install python-docx --break-system-packages
+    ```
+  </Step>
+  <Step title="Verify installation">
+    ```bash
+    python3 -c "import docx; print('python-docx OK')"
+    which libreoffice
+    ```
+  </Step>
+</Steps>
+
+## Complete Conversion Flow
+
+```python convertidor.py
+def convert_source_to_md(source_path: Path, md_path: Path,
+                          folder_name: str, convert_doc: bool) -> tuple[bool, str]:
+    """
+    Maneja la conversión completa de cualquier formato a Markdown.
+
+    Estrategia según extensión:
+      .docx → python-docx (directo, sin intermediario)
+      .doc  → LibreOffice → .docx → python-docx
+      .pdf  → pymupdf4llm directo (mejor calidad para tablas)
+              fallback: LibreOffice → .docx → python-docx
+    """
+    suffix = source_path.suffix.lower()
+
+    # ── .docx: conversión directa con python-docx ─────────────
+    if suffix == ".docx":
+        ok, md_or_err = docx_to_markdown(source_path, folder_name)
+        if ok:
+            md_path.write_text(md_or_err, encoding="utf-8")
+            return True, "Word .docx convertido a Markdown."
+        _write_error_md(md_path, folder_name, source_path.name, md_or_err)
+        return False, md_or_err
+
+    # ── .doc: LibreOffice → .docx → python-docx ────────────────
+    if suffix == ".doc":
+        if not convert_doc:
+            msg = ".doc detectado y la conversión automática está desactivada."
+            _write_error_md(md_path, folder_name, source_path.name, msg)
+            return False, msg
+
+        temp_dir = TEMP_DIR / f"{slugify_ascii(folder_name)}_{os.getpid()}"
+        ok_lo, docx_path, msg_lo = convert_to_docx_via_libreoffice(source_path, temp_dir)
+        if not ok_lo:
+            _write_error_md(md_path, folder_name, source_path.name, msg_lo)
+            return False, msg_lo
+        ok, md_or_err = docx_to_markdown(docx_path, folder_name)
+        if ok:
+            md_path.write_text(md_or_err, encoding="utf-8")
+            return True, "Word .doc convertido vía LibreOffice → .docx → Markdown."
+        _write_error_md(md_path, folder_name, source_path.name, md_or_err)
+        return False, md_or_err
+```
+
+<Check>
+  **Platform Independent**: The python-docx library is cross-platform and doesn't require Microsoft Office
+</Check>

@@ -1,0 +1,592 @@
+---
+title: Cache Management
+description: Understanding and managing SIAA's response cache system
+icon: database
+---
+
+## Overview
+
+SIAA implements a high-performance LRU (Least Recently Used) cache that stores responses to document-based queries. Cache hits return responses in ~5ms compared to ~44s without cache — an **8,800x speedup**.
+
+## Cache Operations
+
+The cache is managed through the `/siaa/cache` endpoint:
+
+### Get Cache Statistics
+
+Retrieve current cache metrics:
+
+```bash
+curl http://localhost:5000/siaa/cache
+```
+
+Response:
+
+```json
+{
+  "entradas": 47,
+  "max": 200,
+  "hits": 342,
+  "misses": 156,
+  "hit_rate": "68.7%",
+  "ttl_seg": 3600
+}
+```
+
+<ResponseField name="entradas" type="integer">
+  Current number of cached responses. Maximum is `CACHE_MAX_ENTRADAS` (default: 200).
+</ResponseField>
+
+<ResponseField name="max" type="integer">
+  Maximum cache capacity (configured via `CACHE_MAX_ENTRADAS`).
+</ResponseField>
+
+<ResponseField name="hits" type="integer">
+  Total number of queries served from cache since server start. Cumulative counter.
+</ResponseField>
+
+<ResponseField name="misses" type="integer">
+  Total number of queries that required full AI processing. Cumulative counter.
+</ResponseField>
+
+<ResponseField name="hit_rate" type="string">
+  Percentage of queries served from cache: `hits / (hits + misses) * 100`.
+</ResponseField>
+
+<ResponseField name="ttl_seg" type="integer">
+  Time-to-live for cache entries in seconds (configured via `CACHE_TTL_SEGUNDOS`).
+</ResponseField>
+
+### Clear Cache
+
+Delete all cached responses:
+
+```bash
+curl -X DELETE http://localhost:5000/siaa/cache
+```
+
+Response:
+
+```json
+{
+  "vaciado": true,
+  "mensaje": "Caché limpiado correctamente"
+}
+```
+
+<Warning>
+  Clearing the cache forces all subsequent queries to perform full AI processing until the cache rebuilds. Hit rate will temporarily drop to 0%.
+</Warning>
+
+## Cache Key Generation
+
+### How Keys Are Created
+
+Cache keys are generated from normalized questions using the `_clave_cache()` function:
+
+```python
+def _clave_cache(texto: str) -> str:
+    """
+    Genera clave de caché normalizada — insensible a tildes, puntuación y mayúsculas.
+    "¿Cuándo debo reportar?" == "cuando debo reportar" == "CUANDO DEBO REPORTAR"
+    """
+    import unicodedata
+    t = texto.lower()
+    t = re.sub(r'[^\w\s]', '', t)
+    # Eliminar tildes: "cuándo" → "cuando", "información" → "informacion"
+    t = ''.join(c for c in unicodedata.normalize('NFD', t)
+                if unicodedata.category(c) != 'Mn')
+    t = re.sub(r'\s+', ' ', t).strip()
+    return hashlib.sha256(t.encode()).hexdigest()[:16]
+```
+
+### Normalization Process
+
+1. **Convert to lowercase**: `"REPORTAR"` → `"reportar"`
+2. **Remove punctuation**: `"¿Cuándo?"` → `"Cuándo"`
+3. **Remove accents**: `"Cuándo información"` → `"Cuando informacion"`
+4. **Normalize whitespace**: Multiple spaces → single space
+5. **Hash with SHA256**: Take first 16 characters
+
+### Equivalent Questions
+
+These variations produce the **same cache key**:
+
+```
+"¿Cuál es la periodicidad del reporte?"
+"Cual es la periodicidad del reporte"
+"CUAL ES LA PERIODICIDAD DEL REPORTE"
+"  ¿cuál  es la periodicidad   del reporte?  "
+```
+
+<Info>
+  Case, accents, punctuation, and extra whitespace are ignored. This maximizes cache hits for semantically identical questions.
+</Info>
+
+## Cache Entry Structure
+
+### Internal Data Model
+
+Each cache entry contains:
+
+```python
+{
+    "respuesta": str,  # Full AI response text
+    "cita": str,       # Source citation with document links
+    "ts": float,       # Unix timestamp when cached
+    "hits": int,       # Number of times this entry was served
+}
+```
+
+### Example Entry
+
+```python
+_cache_respuestas["a3f2c1...9d8e"] = {
+    "respuesta": "El reporte SIERJU debe presentarse el quinto día hábil...",
+    "cita": "\n\n📄 **Fuente:** ACUERDO_NO._PSAA16-10476\n\n[📖 Ver...](...)",
+    "ts": 1709906625.432,
+    "hits": 12
+}
+```
+
+### Entry Lifecycle
+
+<Steps>
+  <Step title="Cache Miss">
+    Question not found in cache. Full AI processing occurs.
+  </Step>
+  <Step title="Response Generated">
+    AI produces response with document citations.
+  </Step>
+  <Step title="Cache Store">
+    `cache_set()` stores the response with current timestamp.
+  </Step>
+  <Step title="Cache Hit">
+    Subsequent identical questions retrieve cached response in ~5ms.
+  </Step>
+  <Step title="LRU Update">
+    Entry moves to end of OrderedDict (most recently used).
+  </Step>
+  <Step title="Hit Counter Incremented">
+    `entry["hits"]` increases to track popularity.
+  </Step>
+  <Step title="Expiration">
+    After `CACHE_TTL_SEGUNDOS`, entry is deleted on next access attempt.
+  </Step>
+</Steps>
+
+## LRU Eviction Policy
+
+### How LRU Works
+
+SIAA uses Python's `OrderedDict` to implement LRU:
+
+```python
+from collections import OrderedDict
+
+_cache_respuestas = OrderedDict()  # Maintains insertion order
+
+def cache_get(pregunta: str) -> dict | None:
+    # ... find entry ...
+    # HIT — move to end (most recently used)
+    _cache_respuestas.move_to_end(clave)
+    return entry
+
+def cache_set(pregunta: str, respuesta: str, cita: str):
+    # If cache is full, remove oldest (front of OrderedDict)
+    while len(_cache_respuestas) >= CACHE_MAX_ENTRADAS:
+        _cache_respuestas.popitem(last=False)  # Remove oldest
+    # Add new entry at end
+    _cache_respuestas[clave] = {...}
+```
+
+### Eviction Behavior
+
+<Tabs>
+  <Tab title="Cache Not Full">
+    New entries are added without eviction. `entradas < CACHE_MAX_ENTRADAS`.
+  </Tab>
+  <Tab title="Cache Full">
+    When adding a new entry:
+    1. Oldest (least recently accessed) entry is removed from front
+    2. New entry is added at end
+    3. Total entries remains at `CACHE_MAX_ENTRADAS`
+  </Tab>
+  <Tab title="Cache Hit">
+    When retrieving an existing entry:
+    1. Entry is moved to end (becomes "most recent")
+    2. Total entries unchanged
+    3. Entry is now protected from eviction until `CACHE_MAX_ENTRADAS` new entries are added
+  </Tab>
+</Tabs>
+
+### Eviction Example
+
+Cache capacity: 3 entries
+
+```
+1. Add query A  → [A]
+2. Add query B  → [A, B]
+3. Add query C  → [A, B, C]  # Full
+4. Add query D  → [B, C, D]  # A evicted (oldest)
+5. Access B     → [C, D, B]  # B moved to end
+6. Add query E  → [D, B, E]  # C evicted (oldest)
+```
+
+## Hit Rate Monitoring
+
+### Calculating Hit Rate
+
+Hit rate is calculated as:
+
+```python
+total = _cache_hits + _cache_misses
+hit_rate = (_cache_hits / total * 100) if total > 0 else 0
+```
+
+### Interpreting Hit Rates
+
+<AccordionGroup>
+  <Accordion title="70%+ Hit Rate (Excellent)">
+    Optimal performance. Most queries are repeat questions. Cache is highly effective.
+    
+    **Recommendation**: No action needed. Monitor stability.
+  </Accordion>
+  
+  <Accordion title="40-70% Hit Rate (Good)">
+    Healthy cache utilization. Expected range for 26 judicial offices with similar workflows.
+    
+    **Recommendation**: Continue monitoring. Consider increasing `CACHE_MAX_ENTRADAS` if hit rate trends downward.
+  </Accordion>
+  
+  <Accordion title="20-40% Hit Rate (Fair)">
+    Moderate cache effectiveness. Queries may be too diverse or cache too small.
+    
+    **Recommendation**:
+    - Increase `CACHE_MAX_ENTRADAS` from 200 to 400
+    - Increase `CACHE_TTL_SEGUNDOS` from 3600 to 7200 (2 hours)
+  </Accordion>
+  
+  <Accordion title="<20% Hit Rate (Poor)">
+    Low cache utilization. Investigate root cause.
+    
+    **Possible causes**:
+    - Highly diverse queries (each user asks unique questions)
+    - Cache too small for user base
+    - Frequent cache clearing
+    - Very short TTL causing premature expiration
+    
+    **Recommendation**: Increase both `CACHE_MAX_ENTRADAS` and `CACHE_TTL_SEGUNDOS` significantly.
+  </Accordion>
+</AccordionGroup>
+
+### Monitoring Hit Rate Over Time
+
+```bash
+#!/bin/bash
+# monitor-cache.sh
+while true; do
+  STATS=$(curl -s http://localhost:5000/siaa/cache)
+  RATE=$(echo $STATS | jq -r '.hit_rate')
+  ENTRIES=$(echo $STATS | jq -r '.entradas')
+  echo "$(date '+%H:%M:%S') - Hit rate: $RATE, Entries: $ENTRIES"
+  sleep 300  # Every 5 minutes
+done
+```
+
+## When to Clear Cache
+
+### Required Cache Clear Scenarios
+
+<Warning>
+  Clear the cache in these situations to prevent serving outdated information:
+</Warning>
+
+#### 1. Document Updates
+
+When modifying source documents:
+
+```bash
+# After editing documents in /opt/siaa/fuentes/
+sudo vim /opt/siaa/fuentes/acuerdo_psaa16-10476.md
+
+# Reload documents and clear cache
+curl http://localhost:5000/siaa/recargar
+curl -X DELETE http://localhost:5000/siaa/cache
+```
+
+<Info>
+  The `/siaa/recargar` endpoint automatically clears the cache after reloading documents.
+</Info>
+
+#### 2. Adding New Documents
+
+When adding documents that may answer previously unanswerable questions:
+
+```bash
+# Add new document
+sudo cp nueva_resolucion.md /opt/siaa/fuentes/
+
+# Reload and clear cache
+curl http://localhost:5000/siaa/recargar
+```
+
+#### 3. Configuration Changes
+
+After changing chunking or extraction parameters:
+
+```bash
+# After editing siaa_proxy.py configuration
+sudo systemctl restart siaa
+
+# Cache is automatically cleared on restart
+```
+
+#### 4. Quality Issues
+
+If log analysis reveals systematic hallucinations:
+
+```bash
+# Check for widespread quality issues
+curl "http://localhost:5000/siaa/log?alerta=POSIBLE_ALUCINACION&n=50"
+
+# If many recent hallucinations, clear cache
+curl -X DELETE http://localhost:5000/siaa/cache
+```
+
+### Optional Cache Clear Scenarios
+
+Consider clearing cache to gather fresh performance data:
+
+- Before performance benchmarking
+- After system upgrades
+- Monthly maintenance (if desired)
+
+## Cache Exclusions
+
+### What is NOT Cached
+
+SIAA deliberately excludes certain responses from caching:
+
+#### 1. Conversational Queries
+
+```python
+CACHE_SOLO_DOC = True  # Only cache document-based queries
+
+# NOT cached:
+"Hola"
+"Buenos días"
+"Gracias"
+"¿Qué es SIAA?"
+```
+
+Conversational responses are unique and don't benefit from caching.
+
+#### 2. Empty Responses
+
+```python
+if not respuesta.strip():
+    return  # No cachear respuestas vacías
+```
+
+#### 3. "No encontré" Responses
+
+```python
+if "no encontré esa información" in respuesta.lower():
+    return  # No cachear respuestas negativas
+```
+
+Negative responses are not cached because:
+- Document additions may later answer the question
+- Extraction improvements may find relevant content
+- These responses have minimal computational cost
+
+### Cache-Only Query Types
+
+✅ **Cached**: `tipo == "DOC"` and response contains actual information
+
+❌ **Not Cached**:
+- `tipo == "CONV"` (conversational)
+- Empty responses
+- "No encontré" responses
+- Error responses
+
+## Performance Impact
+
+### Cache Hit Performance
+
+Cache hits deliver dramatic performance improvements:
+
+| Metric | Without Cache | With Cache | Improvement |
+|--------|---------------|------------|-------------|
+| Response time | ~44 seconds | ~5 milliseconds | **8,800x faster** |
+| AI processing | Full model inference | None | **100% reduction** |
+| RAM usage | ~2 GB (model active) | Minimal | **99% reduction** |
+| CPU usage | ~100% on 6 cores | &lt;1% | **99% reduction** |
+
+### Resource Savings
+
+With 40% hit rate across 100 daily queries:
+
+```
+Daily queries: 100
+Cache hits: 40 (40%)
+
+Time saved per day:
+40 × (44s - 0.005s) = 1,760 seconds ≈ 29 minutes
+
+AI processing cycles saved:
+40 × full inference = significant RAM/CPU reduction
+```
+
+### Cache Memory Usage
+
+Estimate cache memory footprint:
+
+```python
+# Average response size: ~500 characters
+# Average citation size: ~200 characters
+# Per entry overhead: ~100 bytes
+
+Entry size ≈ (500 + 200) chars × 2 bytes/char + 100 bytes ≈ 1,500 bytes
+
+Total cache memory (200 entries):
+200 × 1,500 bytes ≈ 300 KB
+```
+
+<Info>
+  Cache memory usage is negligible (~300 KB for 200 entries). Feel free to increase `CACHE_MAX_ENTRADAS` significantly without RAM concerns.
+</Info>
+
+## Optimizing Cache Settings
+
+### Increasing Cache Size
+
+For larger user bases or higher query diversity:
+
+```python
+# In siaa_proxy.py
+CACHE_MAX_ENTRADAS = 500  # Increase from 200 to 500
+```
+
+Restart required:
+
+```bash
+sudo systemctl restart siaa
+```
+
+### Extending TTL
+
+For more stable document sets:
+
+```python
+CACHE_TTL_SEGUNDOS = 7200  # 2 hours instead of 1 hour
+```
+
+<Warning>
+  Longer TTL means updates to source documents take longer to propagate. Balance freshness vs performance.
+</Warning>
+
+### Disabling Cache
+
+For testing or debugging (not recommended for production):
+
+```python
+CACHE_SOLO_DOC = False  # Disable all caching
+# OR
+CACHE_MAX_ENTRADAS = 0  # Set capacity to 0
+```
+
+## Monitoring Best Practices
+
+### Daily Cache Health Check
+
+```bash
+#!/bin/bash
+# cache-health.sh
+STATS=$(curl -s http://localhost:5000/siaa/cache)
+RATE=$(echo $STATS | jq -r '.hit_rate' | tr -d '%')
+ENTRIES=$(echo $STATS | jq -r '.entradas')
+MAX=$(echo $STATS | jq -r '.max')
+
+echo "Cache Health Report:"
+echo "  Hit rate: ${RATE}%"
+echo "  Utilization: ${ENTRIES}/${MAX} ($(awk "BEGIN {print ($ENTRIES/$MAX)*100}")%)"
+
+if (( $(echo "$RATE < 30" | bc -l) )); then
+  echo "  ⚠ Warning: Low hit rate"
+fi
+
+if (( ENTRIES == MAX )); then
+  echo "  ⚠ Warning: Cache full (consider increasing CACHE_MAX_ENTRADAS)"
+fi
+```
+
+### Cache Performance Alerts
+
+```bash
+# Alert if hit rate drops below 25%
+RATE=$(curl -s http://localhost:5000/siaa/cache | jq -r '.hit_rate' | tr -d '%')
+if (( $(echo "$RATE < 25" | bc -l) )); then
+  echo "ALERT: Cache hit rate is ${RATE}%" | \
+    mail -s "SIAA Cache Alert" admin@example.com
+fi
+```
+
+## Troubleshooting
+
+### Cache Not Working
+
+**Symptom**: `hit_rate: "0.0%"` despite repeat queries
+
+**Check**:
+
+```bash
+# Verify cache is enabled
+grep CACHE_SOLO_DOC /opt/siaa/siaa_proxy.py
+grep CACHE_MAX_ENTRADAS /opt/siaa/siaa_proxy.py
+
+# Check for errors in logs
+journalctl -u siaa | grep -i cache
+```
+
+### Low Hit Rate Despite Repeat Queries
+
+**Symptom**: Users report asking the same questions but hit rate is low
+
+**Cause**: Question variations prevent key matching
+
+Examples:
+
+```
+"¿Cuál es la periodicidad?"          → Key: abc123...
+"Cuál es la periodicidad del SIERJU" → Key: def456...  (different!)
+```
+
+**Solution**: Educate users to ask consistent questions, or expand normalization logic.
+
+### Cache Memory Concerns
+
+**Symptom**: Concern about cache consuming too much RAM
+
+**Reality**: Cache uses minimal memory (~300 KB for 200 entries)
+
+**Verification**:
+
+```bash
+# Check SIAA process memory
+ps aux | grep siaa_proxy.py
+
+# Most memory is used by Ollama model (~2 GB), not cache
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="sliders" href="/administration/configuration">
+    Adjust cache settings in system configuration
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/administration/monitoring">
+    Track cache performance in real-time
+  </Card>
+</CardGroup>
