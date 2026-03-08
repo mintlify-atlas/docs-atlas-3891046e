@@ -1,0 +1,111 @@
+{
+  "projectType": "saas",
+  "projectName": "SIAA",
+  "projectDescription": "Sistema Inteligente de Apoyo Administrativo for judicial document management and intelligent query assistance.",
+  "theme": "linden",
+  "primaryColor": "#1a2a6c",
+  "lightColor": "#e8ecf8",
+  "darkColor": "#c5a059",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/intelligent-retrieval",
+              "features/document-processing",
+              "features/cache-system",
+              "features/quality-monitoring"
+            ]
+          },
+          {
+            "group": "Document Processing",
+            "pages": [
+              "document-processing/word-conversion",
+              "document-processing/pdf-conversion",
+              "document-processing/excel-to-sqlite"
+            ]
+          },
+          {
+            "group": "System Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/document-routing",
+              "architecture/chunking",
+              "architecture/ollama-integration"
+            ]
+          },
+          {
+            "group": "Administration",
+            "pages": [
+              "administration/configuration",
+              "administration/monitoring",
+              "administration/log-analysis",
+              "administration/cache-management"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api/chat",
+              "api/status",
+              "api/view-document",
+              "api/reload",
+              "api/cache",
+              "api/log"
+            ]
+          },
+          {
+            "group": "Utility Endpoints",
+            "pages": [
+              "api/keywords",
+              "api/density",
+              "api/enrutar",
+              "api/fragmento"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Multi-level document routing with TF-IDF and density indexing",
+    "RAG-based Q&A system with Ollama integration",
+    "LRU response cache with 1-hour TTL",
+    "JSONL quality monitoring with hallucination detection",
+    "Document conversion pipeline (Word/PDF/Excel)",
+    "Chunk-based retrieval with sliding window overlap",
+    "Web-based chat interface with streaming responses",
+    "Health monitoring and automatic model warm-up"
+  ],
+  "publicApiSurface": [
+    "POST /siaa/chat - Main chat endpoint with streaming responses",
+    "GET /siaa/status - System health and statistics",
+    "GET /siaa/ver/<nombre_doc> - View document content",
+    "GET /siaa/recargar - Reload document index",
+    "GET /siaa/cache - Cache statistics",
+    "DELETE /siaa/cache - Clear cache",
+    "GET /siaa/log - Quality monitoring logs",
+    "GET /siaa/keywords/<nombre_doc> - Document keywords",
+    "GET /siaa/densidad/<termino> - Term density lookup",
+    "GET /siaa/enrutar - Test document routing",
+    "GET /siaa/fragmento - Test fragment extraction",
+    "convertidor.py - Document conversion utility",
+    "convertidor_pdf.py - PDF-specific converter"
+  ]
+}
